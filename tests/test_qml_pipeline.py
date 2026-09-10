@@ -19,6 +19,7 @@ class QmlScanPipelineTests(unittest.TestCase):
         self.assertIn("panel", manifest["kinds"])
         self.assertIn("bar-widget", manifest["kinds"])
         self.assertEqual(manifest["entryPoints"]["barWidget"], "BarWidget.qml")
+        self.assertEqual(manifest["barWidget"]["defaultSection"], "right")
         self.assertIn('bar.shell.summon(moduleName, "{}")', widget)
         self.assertIn("displayMode = (displayMode + 1) % 4", widget)
         self.assertIn("totalBytes > 0", widget)

@@ -462,14 +462,6 @@ Item {
           snapshotDirectoryCount = activeDirectoryCount
           snapshotDurationMs = Number(activeComplete.durationMs || 0)
           snapshotState = "complete"
-          var committedRows = TreeModel.visibleNodes(treeCache, path)
-          console.info("OmaTree tree commit root=" + path
-            + " staged=" + activeDirectoryCount
-            + " scannerRootChildren=" + completedRoot.childDirectoryCount
-            + " linkedRootChildren=" + completedRoot.children.length
-            + " firstRootChildren=" + completedRoot.children.slice(0, 10).join(",")
-            + " visibleRows=" + committedRows.length
-            + " expanded=" + completedRoot.expanded)
         }
       } else if (!activeExpectedStop && !activeCancelled) {
         node.error = activeProtocolError || activeStderr || "Directory scan failed."

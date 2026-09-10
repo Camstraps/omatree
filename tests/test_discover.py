@@ -18,7 +18,7 @@ def fake_capacity(path):
     sizes = {
         "/": 500 * 1024**3,
         "/home": 500 * 1024**3,
-        "/home/camstraps/SSD_M2": 900 * 1024**3,
+        "/home/alex/ExternalSSD": 900 * 1024**3,
         "/mnt/share": 2 * 1024**4,
     }
     total = sizes[path]
@@ -62,7 +62,7 @@ class DiscoveryTests(unittest.TestCase):
                             "path": "/dev/nvme1n1p1",
                             "type": "part",
                             "fstype": "ext4",
-                            "label": "SSD M2",
+                            "label": "External SSD",
                             "uuid": "ssd-uuid",
                         }
                     ],
@@ -98,7 +98,7 @@ class DiscoveryTests(unittest.TestCase):
                             "children": [
                                 {
                                     "source": "/dev/nvme1n1p1",
-                                    "target": "/home/camstraps/SSD_M2",
+                                    "target": "/home/alex/ExternalSSD",
                                     "fstype": "ext4",
                                 }
                             ],
@@ -118,12 +118,12 @@ class DiscoveryTests(unittest.TestCase):
         by_mount = {item["mountpoint"]: item for item in result["filesystems"]}
 
         self.assertIn("/home", by_mount)
-        self.assertIn("/home/camstraps/SSD_M2", by_mount)
-        ssd = by_mount["/home/camstraps/SSD_M2"]
+        self.assertIn("/home/alex/ExternalSSD", by_mount)
+        ssd = by_mount["/home/alex/ExternalSSD"]
         self.assertEqual(ssd["devicePath"], "/dev/nvme1n1p1")
         self.assertEqual(ssd["physicalDevice"], "/dev/nvme1n1")
         self.assertEqual(ssd["physicalDiskLabel"], "WDC Data SSD")
-        self.assertEqual(ssd["displayName"], "SSD M2")
+        self.assertEqual(ssd["displayName"], "External SSD")
 
     def test_pseudo_filesystems_are_hidden(self):
         result = discover.build_discovery(self.lsblk, self.findmnt, fake_capacity)

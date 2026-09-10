@@ -18,6 +18,7 @@
     "displayName": "OmaTree",
     "description": "Filesystem capacity and OmaTree launcher",
     "category": "System",
-    "allowMultiple": false
+    "allowMultiple": false,
+    "defaultSection": "right"
   }
 }
