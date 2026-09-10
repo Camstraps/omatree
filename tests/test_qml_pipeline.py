@@ -33,6 +33,33 @@ class QmlScanPipelineTests(unittest.TestCase):
         self.assertIn("if (activeGeneration !== treeGeneration) return", panel)
         self.assertEqual(panel.count("Process {\n    id: scanProcess"), 1)
 
+    def test_search_and_reveal_never_request_scans(self):
+        panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
+        search = panel.split("function beginSearch()", 1)[1].split(
+            "function copySelectedPath()", 1
+        )[0]
+        self.assertNotIn("requestScan", search)
+        self.assertNotIn("scanProcess", search)
+        self.assertIn("TreeModel.revealPath(treeCache, path)", panel)
+        self.assertIn("searchResultLimit: 500", panel)
+
+    def test_actions_use_safe_argument_arrays(self):
+        panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
+        self.assertIn('copyProcess.command = ["wl-copy"]', panel)
+        self.assertIn('Quickshell.execDetached(["xdg-open", selectedTreePath])', panel)
+        self.assertNotIn('"bash", "-c"', panel)
+
+    def test_refresh_and_expansion_only_have_one_scan_entrypoint(self):
+        panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
+        toggle = panel.split("function toggleNode(path)", 1)[1].split(
+            "function retryNode(path)", 1
+        )[0]
+        choose = panel.split("function chooseSearchResult(path)", 1)[1].split(
+            "function copySelectedPath()", 1
+        )[0]
+        self.assertNotIn("requestScan", toggle + choose)
+        self.assertEqual(panel.count("requestScan(mountpoint)"), 1)
+
     def test_refresh_has_one_filesystem_scan_entrypoint(self):
         panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
         selection = panel.split("function selectFilesystem(index)", 1)[1].split(

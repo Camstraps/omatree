@@ -5,8 +5,14 @@ native Quickshell interface. It is inspired by TreeSize and ncdu.
 
 The current version discovers mounted filesystems, groups them by their backing
 physical disks where possible, and displays their capacity. Selecting a
-filesystem starts an asynchronous allocated-size scan. Directories can be
-expanded lazily, with completed results cached for the current shell session.
+filesystem starts one asynchronous allocated-size scan that constructs a full
+in-memory directory snapshot. Expanding, collapsing, searching, and navigating
+that snapshot perform no further filesystem traversal.
+
+The panel provides a virtualized directory table with parent-relative size
+bars, breadcrumbs, keyboard navigation, bounded in-memory search, Copy Path,
+and Open Folder actions. Search is limited to the 500 largest matches so broad
+queries remain responsive on very large directory trees.
 
 ## Scanner protocol
 
@@ -36,8 +42,13 @@ Once published, install and enable OmaTree with:
 omarchy plugin add https://github.com/Camstraps/omatree.git --enable
 ```
 
-During local development, place the repository at
-`~/.config/omarchy/plugins/io.github.camstraps.omatree` and rescan plugins.
+During local development, update the installed clone and restart the shell so
+Quickshell does not retain an older instantiated component:
+
+```bash
+omarchy plugin update io.github.camstraps.omatree --yes
+omarchy restart shell
+```
 
 ## Open
 

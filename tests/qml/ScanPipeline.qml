@@ -24,6 +24,7 @@ ShellRoot {
   property int processStarts: 0
   property var cache: ({})
   property bool postorderFixturePassed: false
+  property bool uxModelFixturePassed: false
 
   ListModel { id: visibleRows }
 
@@ -67,6 +68,48 @@ ShellRoot {
       && built.cache["/root/a"].children.length === 1
       && built.cache["/root/b"].children.length === 1
       && visible.length === 3
+
+    var cache = built.cache
+    var zero = TreeModel.createNode("zero", "/zero", 0, 0, 0)
+    zero.loaded = true
+    cache["/zero"] = zero
+    var percentOk = TreeModel.percentageOfParent(cache, "/root/a", 100) === (20 * 100 / 60)
+      && TreeModel.percentageOfParent(cache, "/root", 100) === 100
+      && TreeModel.percentageOfParent(cache, "/zero", 0) === 0
+      && TreeModel.clampPercent(140) === 100 && TreeModel.clampPercent(-4) === 0
+    TreeModel.revealPath(cache, "/root/a/a1")
+    var breadcrumb = TreeModel.ancestorPaths(cache, "/root/a/a1")
+    var search = TreeModel.searchMatches(cache, "A", 20)
+    var searchSorted = search.matches.length === 2
+      && search.matches[0].path === "/root/a" && search.matches[1].path === "/root/a/a1"
+    uxModelFixturePassed = percentOk && cache["/root/a"].expanded
+      && breadcrumb.join(",") === "/root,/root/a,/root/a/a1" && searchSorted
+    var heap = []
+    TreeModel.offerSearchMatch(heap, cache["/root/a/a1"], 1)
+    TreeModel.offerSearchMatch(heap, cache["/root/b"], 1)
+    uxModelFixturePassed = uxModelFixturePassed
+      && TreeModel.sortedSearchHeap(heap).length === 1
+      && TreeModel.sortedSearchHeap(heap)[0].path === "/root/b"
+
+    var large = ({})
+    var largeRoot = TreeModel.createNode("large", "/large", 10000, 0, 0)
+    largeRoot.loaded = true; largeRoot.expanded = true; largeRoot.children = []
+    large[largeRoot.path] = largeRoot
+    for (var branchIndex = 0; branchIndex < 100; branchIndex++) {
+      var branchPath = "/large/b" + branchIndex
+      var branch = TreeModel.createNode("b" + branchIndex, branchPath, 100, 1, 0)
+      branch.loaded = true; branch.parentPath = "/large"; branch.children = []
+      large[branchPath] = branch; largeRoot.children.push(branchPath)
+      for (var leafIndex = 0; leafIndex < 100; leafIndex++) {
+        var leafPath = branchPath + "/l" + leafIndex
+        var leaf = TreeModel.createNode("l" + leafIndex, leafPath, 1, 2, 1)
+        leaf.loaded = true; leaf.parentPath = branchPath
+        large[leafPath] = leaf; branch.children.push(leafPath)
+      }
+    }
+    uxModelFixturePassed = uxModelFixturePassed
+      && Object.keys(large).length === 10101
+      && TreeModel.visibleNodes(large, "/large").length === 101
   }
 
   Component.onCompleted: verifyPostorderFixture()
@@ -130,7 +173,7 @@ ShellRoot {
         && visibleAfterReexpand.length === directoryCount
         && initialVisibleRowCount === rootNode.children.length + 1
         && processStarts === startsBeforeExpansion && processStarts === 1
-        && postorderFixturePassed) {
+        && postorderFixturePassed && uxModelFixturePassed) {
       console.log("OMATREE_PIPELINE_PASS directories=" + directoryCount
                   + " rootChildren=" + rootNode.children.length
                   + " first=" + rootNode.children.slice(0, 10).join(","))

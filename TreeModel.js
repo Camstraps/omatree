@@ -18,8 +18,92 @@ function createNode(name, path, bytes, depth, directFilesBytes) {
     formattedSize: formatBytes(bytes), depth: Number(depth || 0), expanded: false,
     loading: false, loaded: false, warningCount: 0, warningText: "", error: "",
     children: [], requestId: "", directFilesBytes: Number(directFilesBytes || 0),
-    childDirectoryCount: 0
+    childDirectoryCount: 0, parentPath: ""
   }
+}
+
+function clampPercent(value) {
+  var number = Number(value || 0)
+  if (!isFinite(number)) return 0
+  return Math.max(0, Math.min(100, number))
+}
+
+function percentageOfParent(cache, path, rootBytes) {
+  var node = cache[path]
+  if (!node) return 0
+  if (!node.parentPath) return Number(node.bytes || 0) > 0 ? 100 : 0
+  var parentBytes = node.parentPath && cache[node.parentPath]
+    ? Number(cache[node.parentPath].bytes || 0) : Number(rootBytes || node.bytes || 0)
+  if (parentBytes <= 0) return 0
+  return clampPercent(Number(node.bytes || 0) * 100 / parentBytes)
+}
+
+function ancestorPaths(cache, path) {
+  var result = []
+  var current = cache[path]
+  var seen = ({})
+  while (current && !seen[current.path]) {
+    result.unshift(current.path)
+    seen[current.path] = true
+    current = current.parentPath ? cache[current.parentPath] : null
+  }
+  return result
+}
+
+function revealPath(cache, path) {
+  var paths = ancestorPaths(cache, path)
+  for (var i = 0; i < paths.length - 1; i++) cache[paths[i]].expanded = true
+  return paths
+}
+
+function searchMatches(cache, query, limit) {
+  var normalized = String(query || "").toLocaleLowerCase()
+  var matches = []
+  if (!normalized) return { matches: matches, total: 0 }
+  for (var path in cache) {
+    var node = cache[path]
+    if (node.name.toLocaleLowerCase().indexOf(normalized) !== -1) matches.push(node)
+  }
+  matches.sort(function(left, right) {
+    if (left.bytes !== right.bytes) return right.bytes - left.bytes
+    return left.path.localeCompare(right.path)
+  })
+  return { matches: matches.slice(0, Math.max(0, Number(limit || matches.length))), total: matches.length }
+}
+
+// Bounded min-heap used by the QML timer-driven search. It keeps search memory
+// stable even for a query that matches every directory in a large snapshot.
+function offerSearchMatch(heap, node, limit) {
+  function less(left, right) {
+    if (left.bytes !== right.bytes) return left.bytes < right.bytes
+    return left.path > right.path
+  }
+  function swap(a, b) { var value = heap[a]; heap[a] = heap[b]; heap[b] = value }
+  function up(index) {
+    while (index > 0) {
+      var parent = Math.floor((index - 1) / 2)
+      if (!less(heap[index], heap[parent])) break
+      swap(index, parent); index = parent
+    }
+  }
+  function down(index) {
+    while (true) {
+      var left = index * 2 + 1, right = left + 1, smallest = index
+      if (left < heap.length && less(heap[left], heap[smallest])) smallest = left
+      if (right < heap.length && less(heap[right], heap[smallest])) smallest = right
+      if (smallest === index) break
+      swap(index, smallest); index = smallest
+    }
+  }
+  if (heap.length < limit) { heap.push(node); up(heap.length - 1) }
+  else if (limit > 0 && less(heap[0], node)) { heap[0] = node; down(0) }
+}
+
+function sortedSearchHeap(heap) {
+  return heap.slice().sort(function(left, right) {
+    if (left.bytes !== right.bytes) return right.bytes - left.bytes
+    return left.path.localeCompare(right.path)
+  })
 }
 
 function stageDirectory(cache, pendingChildren, record) {

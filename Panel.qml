@@ -47,6 +47,19 @@ Item {
   property var pendingScan: null
   property int progressEntries: 0
   property double progressBytes: 0
+  property double scanStartedAt: 0
+  property double scanElapsedSeconds: 0
+  property int snapshotDirectoryCount: 0
+  property double snapshotDurationMs: 0
+  property string snapshotState: "idle"
+  property string searchQuery: ""
+  property var searchKeys: []
+  property int searchIndex: 0
+  property var searchHeap: []
+  property int searchMatchCount: 0
+  property bool searchRunning: false
+  property int searchResultLimit: 500
+  property string actionFeedback: ""
 
   readonly property string pluginId: (manifest && manifest.id)
     ? String(manifest.id) : "io.github.camstraps.omatree"
@@ -96,6 +109,11 @@ Item {
     progressEntries = 0
     progressBytes = 0
     treeRows.clear()
+    breadcrumbModel.clear()
+    cancelSearch()
+    snapshotDirectoryCount = 0
+    snapshotDurationMs = 0
+    snapshotState = "idle"
   }
 
   function applyDiscovery(raw) {
@@ -142,6 +160,7 @@ Item {
   }
 
   function rebuildTreeRows() {
+    if (searchQuery.trim() !== "") return
     var visible = TreeModel.visibleNodes(treeCache, treeRootPath)
     treeRows.clear()
     selectedTreeIndex = -1
@@ -152,7 +171,11 @@ Item {
         formattedSize: node.formattedSize, depth: node.depth,
         expanded: node.expanded, loading: node.loading, loaded: node.loaded,
         warningCount: node.warningCount, warningText: node.warningText,
-        errorText: node.error
+        errorText: node.error,
+        hasChildren: node.childDirectoryCount > 0,
+        percentParent: TreeModel.percentageOfParent(treeCache, node.path,
+          selectedFilesystem ? selectedFilesystem.totalBytes : node.bytes),
+        contextPath: node.path, searchResult: false
       })
       if (node.path === selectedTreePath) selectedTreeIndex = i
     }
@@ -160,6 +183,105 @@ Item {
       selectedTreeIndex = 0
       selectedTreePath = treeRows.get(0).nodePath
     }
+    rebuildBreadcrumb()
+  }
+
+  function selectTreePath(path, reveal) {
+    if (!treeCache[path]) return
+    selectedTreePath = path
+    if (reveal) TreeModel.revealPath(treeCache, path)
+    rebuildTreeRows()
+    if (selectedTreeIndex >= 0) treeView.positionViewAtIndex(selectedTreeIndex, ListView.Contain)
+    rebuildBreadcrumb()
+  }
+
+  function rebuildBreadcrumb() {
+    breadcrumbModel.clear()
+    var paths = TreeModel.ancestorPaths(treeCache, selectedTreePath)
+    for (var i = 0; i < paths.length; i++) {
+      var node = treeCache[paths[i]]
+      breadcrumbModel.append({ crumbName: node ? node.name : paths[i], crumbPath: paths[i] })
+    }
+  }
+
+  function cancelSearch() {
+    searchTimer.stop()
+    searchDebounce.stop()
+    searchKeys = []
+    searchHeap = []
+    searchIndex = 0
+    searchMatchCount = 0
+    searchRunning = false
+  }
+
+  function scheduleSearch() {
+    cancelSearch()
+    if (searchQuery.trim() === "") { rebuildTreeRows(); return }
+    treeRows.clear()
+    searchDebounce.restart()
+  }
+
+  function beginSearch() {
+    var query = searchQuery.trim().toLocaleLowerCase()
+    if (query === "") { rebuildTreeRows(); return }
+    searchKeys = Object.keys(treeCache)
+    searchIndex = 0
+    searchHeap = []
+    searchMatchCount = 0
+    searchRunning = true
+    searchTimer.start()
+  }
+
+  function searchBatch() {
+    var query = searchQuery.trim().toLocaleLowerCase()
+    if (query === "") { cancelSearch(); rebuildTreeRows(); return }
+    var end = Math.min(searchKeys.length, searchIndex + 1500)
+    while (searchIndex < end) {
+      var node = treeCache[searchKeys[searchIndex++]]
+      if (node && node.name.toLocaleLowerCase().indexOf(query) !== -1) {
+        searchMatchCount++
+        TreeModel.offerSearchMatch(searchHeap, node, searchResultLimit)
+      }
+    }
+    if (searchIndex < searchKeys.length) return
+    searchTimer.stop()
+    searchRunning = false
+    var results = TreeModel.sortedSearchHeap(searchHeap)
+    treeRows.clear()
+    selectedTreeIndex = -1
+    for (var i = 0; i < results.length; i++) {
+      var item = results[i]
+      treeRows.append({ nodeName: item.name, nodePath: item.path, nodeBytes: item.bytes,
+        formattedSize: item.formattedSize, depth: 0, expanded: item.expanded,
+        loading: false, loaded: true, warningCount: item.warningCount,
+        warningText: item.warningText, errorText: item.error,
+        hasChildren: item.childDirectoryCount > 0,
+        percentParent: TreeModel.percentageOfParent(treeCache, item.path,
+          selectedFilesystem ? selectedFilesystem.totalBytes : item.bytes),
+        contextPath: item.path, searchResult: true })
+    }
+  }
+
+  function chooseSearchResult(path) {
+    searchField.text = ""
+    searchQuery = ""
+    cancelSearch()
+    selectTreePath(path, true)
+  }
+
+  function copySelectedPath() {
+    if (!selectedTreePath || copyProcess.running) return
+    copyProcess.pathToCopy = selectedTreePath
+    copyProcess.command = ["wl-copy"]
+    copyProcess.stdinEnabled = true
+    copyProcess.running = true
+  }
+
+  function openSelectedFolder() {
+    if (!selectedTreePath) return
+    Quickshell.execDetached(["xdg-open", selectedTreePath])
+    actionFeedback = "Opened folder"
+    feedbackTimer.restart()
   }
 
   function toggleNode(path) {
@@ -173,6 +295,7 @@ Item {
       node.expanded = true
       rebuildTreeRows()
     }
+    rebuildBreadcrumb()
   }
 
   function retryNode(path) {
@@ -218,6 +341,9 @@ Item {
     scanLineQueueIndex = 0
     progressEntries = 0
     progressBytes = 0
+    scanStartedAt = Date.now()
+    scanElapsedSeconds = 0
+    snapshotState = "scanning"
     node.loading = true
     node.error = ""
     node.requestId = activeRequestId
@@ -333,6 +459,9 @@ Item {
           completedRoot.warningText = completedRoot.warningCount > 0
             ? String(completedRoot.warningCount) + " path" + (completedRoot.warningCount === 1 ? "" : "s") + " could not be read"
             : ""
+          snapshotDirectoryCount = activeDirectoryCount
+          snapshotDurationMs = Number(activeComplete.durationMs || 0)
+          snapshotState = "complete"
           var committedRows = TreeModel.visibleNodes(treeCache, path)
           console.info("OmaTree tree commit root=" + path
             + " staged=" + activeDirectoryCount
@@ -344,6 +473,7 @@ Item {
         }
       } else if (!activeExpectedStop && !activeCancelled) {
         node.error = activeProtocolError || activeStderr || "Directory scan failed."
+        snapshotState = "failed"
       }
       rebuildTreeRows()
     }
@@ -369,20 +499,35 @@ Item {
     selectedTreeIndex = next
     selectedTreePath = treeRows.get(next).nodePath
     treeView.positionViewAtIndex(next, ListView.Contain)
+    rebuildBreadcrumb()
   }
 
   function expandSelected() {
     var node = treeCache[selectedTreePath]
-    if (node && !node.expanded) toggleNode(node.path)
+    if (node && node.childDirectoryCount > 0 && !node.expanded) toggleNode(node.path)
   }
 
   function collapseSelected() {
     var node = treeCache[selectedTreePath]
     if (node && node.expanded) toggleNode(node.path)
+    else if (node && node.parentPath) selectTreePath(node.parentPath, false)
   }
 
   ListModel { id: filesystemModel }
   ListModel { id: treeRows }
+  ListModel { id: breadcrumbModel }
+
+  Process {
+    id: copyProcess
+    property string pathToCopy: ""
+    stdinEnabled: true
+    onStarted: { write(pathToCopy); stdinEnabled = false }
+    onExited: function(code) {
+      root.actionFeedback = code === 0 ? "Path copied" : "Could not copy path"
+      feedbackTimer.restart()
+      pathToCopy = ""
+    }
+  }
 
   Process {
     id: discoveryProcess
@@ -414,6 +559,10 @@ Item {
   // Qt timers do not run with a zero interval in the installed Quickshell/Qt
   // combination. One millisecond retains batched UI updates without stalling.
   Timer { id: scanDrainTimer; interval: 1; repeat: true; onTriggered: root.drainScanLines() }
+  Timer { interval: 250; repeat: true; running: root.scanning; onTriggered: root.scanElapsedSeconds = (Date.now() - root.scanStartedAt) / 1000 }
+  Timer { id: searchDebounce; interval: 180; onTriggered: root.beginSearch() }
+  Timer { id: searchTimer; interval: 1; repeat: true; onTriggered: root.searchBatch() }
+  Timer { id: feedbackTimer; interval: 1800; onTriggered: root.actionFeedback = "" }
 
   PanelWindow {
     id: window
@@ -434,8 +583,8 @@ Item {
     BorderSurface {
       id: card
       anchors.centerIn: parent
-      width: Math.min(window.width - Style.space(48), Style.space(1080))
-      height: Math.min(window.height - Style.space(48), Style.space(700))
+      width: Math.min(window.width - Style.space(48), Style.space(1240))
+      height: Math.min(window.height - Style.space(48), Style.space(820))
       radius: Style.cornerRadius
       color: Color.popups.background
       borderSpec: Border.flat(Color.popups.border, 1)
@@ -448,6 +597,22 @@ Item {
         focus: true
         Keys.priority: Keys.BeforeItem
         Keys.onPressed: function(event) {
+          if (searchField.activeFocus) {
+            if (event.key === Qt.Key_Escape) {
+              searchField.text = ""
+              searchField.focus = false
+              keyCatcher.forceActiveFocus()
+              event.accepted = true
+            }
+            else if (event.key === Qt.Key_Down) { root.moveTreeSelection(1); event.accepted = true }
+            else if (event.key === Qt.Key_Up) { root.moveTreeSelection(-1); event.accepted = true }
+            else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                     && root.selectedTreeIndex >= 0) {
+              root.chooseSearchResult(treeRows.get(root.selectedTreeIndex).nodePath)
+              event.accepted = true
+            }
+            return
+          }
           if (event.key === Qt.Key_Escape) root.dismiss()
           else if (event.key === Qt.Key_Down || event.key === Qt.Key_J) root.moveTreeSelection(1)
           else if (event.key === Qt.Key_Up || event.key === Qt.Key_K) root.moveTreeSelection(-1)
@@ -480,7 +645,8 @@ Item {
           spacing: Style.space(16)
 
           BorderSurface {
-            Layout.preferredWidth: Style.space(310)
+            Layout.preferredWidth: Math.min(Style.space(310), card.width * 0.31)
+            Layout.minimumWidth: Style.space(230)
             Layout.fillHeight: true
             radius: Style.cornerRadius
             color: Style.normalFillFor(Color.popups.text, Color.accent)
@@ -504,17 +670,36 @@ Item {
                 font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true
                 elide: Text.ElideRight
               }
-              delegate: Button {
+              delegate: BorderSurface {
                 required property int index
                 required property string displayName
                 required property string mountpoint
                 required property double totalBytes
+                required property double usedBytes
+                required property double usagePercent
                 width: filesystemList.width
-                text: displayName + "  ·  " + TreeModel.formatBytes(totalBytes) + "\n" + mountpoint
-                leftAlign: true
-                selected: root.selectedFilesystemIndex === index
-                foreground: Color.popups.text
-                onClicked: root.selectFilesystem(index)
+                height: Style.space(78)
+                radius: Style.cornerRadius
+                color: root.selectedFilesystemIndex === index || fsMouse.containsMouse
+                  ? Style.hoverFillFor(Color.popups.text, Color.accent) : "transparent"
+                borderSpec: Border.none()
+                MouseArea { id: fsMouse; anchors.fill: parent; hoverEnabled: true; onClicked: root.selectFilesystem(index) }
+                ColumnLayout {
+                  anchors.fill: parent; anchors.margins: Style.space(8); spacing: 1
+                  Text { Layout.fillWidth: true; text: displayName; color: Color.popups.text; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; elide: Text.ElideRight }
+                  Text { Layout.fillWidth: true; text: mountpoint; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; elide: Text.ElideMiddle }
+                  RowLayout {
+                    Layout.fillWidth: true; spacing: Style.space(6)
+                    Text { text: TreeModel.formatBytes(usedBytes) + " / " + TreeModel.formatBytes(totalBytes); color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
+                    Item { Layout.fillWidth: true }
+                    Text { text: Number(usagePercent).toFixed(1) + "%"; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
+                  }
+                  Rectangle {
+                    Layout.fillWidth: true; height: Style.space(4); radius: height / 2
+                    color: Style.normalFillFor(Color.popups.text, Color.accent)
+                    Rectangle { width: parent.width * TreeModel.clampPercent(usagePercent) / 100; height: parent.height; radius: parent.radius; color: Color.accent; opacity: 0.75 }
+                  }
+                }
               }
             }
           }
@@ -563,17 +748,70 @@ Item {
               ColumnLayout {
                 Layout.fillWidth: true; spacing: 0
                 Text { Layout.fillWidth: true; text: "Scanning " + root.activePath + "…"; color: Color.popups.text; font.family: Style.font.family; font.pixelSize: Style.font.body; elide: Text.ElideMiddle }
-                Text { text: root.progressEntries.toLocaleString() + " entries · " + TreeModel.formatBytes(root.progressBytes) + " processed"; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
+                Text { text: root.progressEntries.toLocaleString() + " entries · " + TreeModel.formatBytes(root.progressBytes) + " processed · " + root.scanElapsedSeconds.toFixed(1) + " s"; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
               }
+            }
+
+            RowLayout {
+              Layout.fillWidth: true
+              visible: !root.scanning && root.snapshotState === "complete"
+              Text { Layout.fillWidth: true; text: "Snapshot: " + root.snapshotDirectoryCount.toLocaleString() + " directories · " + (root.snapshotDurationMs / 1000).toFixed(1) + " s"; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
+              Text { visible: root.actionFeedback !== ""; text: root.actionFeedback; color: Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
+            }
+
+            RowLayout {
+              Layout.fillWidth: true; spacing: Style.space(8)
+              TextField {
+                id: searchField
+                Layout.fillWidth: true
+                placeholderText: "Search directories in this snapshot…"
+                foreground: Color.popups.text; accent: Color.accent
+                enabled: root.snapshotState === "complete"
+                onTextChanged: { root.searchQuery = text; root.scheduleSearch() }
+                Keys.onEscapePressed: { text = ""; focus = false; keyCatcher.forceActiveFocus() }
+              }
+              PanelActionButton { iconText: "⧉"; tooltipText: "Copy selected path"; enabled: root.selectedTreePath !== ""; onClicked: root.copySelectedPath() }
+              PanelActionButton { iconText: "↗"; tooltipText: "Open selected folder"; enabled: root.selectedTreePath !== ""; onClicked: root.openSelectedFolder() }
+            }
+
+            Flickable {
+              Layout.fillWidth: true; Layout.preferredHeight: Style.space(28)
+              contentWidth: breadcrumbRow.implicitWidth; contentHeight: height
+              clip: true; boundsBehavior: Flickable.StopAtBounds
+              Row {
+                id: breadcrumbRow; height: parent.height; spacing: Style.space(4)
+                Repeater {
+                  model: breadcrumbModel
+                  delegate: Row {
+                    required property int index
+                    required property string crumbName
+                    required property string crumbPath
+                    height: breadcrumbRow.height; spacing: Style.space(4)
+                    Text { visible: index > 0; anchors.verticalCenter: parent.verticalCenter; text: "›"; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
+                    Button { anchors.verticalCenter: parent.verticalCenter; text: crumbName; foreground: Color.popups.text; onClicked: root.selectTreePath(crumbPath, true) }
+                  }
+                }
+              }
+              Component.onCompleted: contentX = Math.max(0, contentWidth - width)
+              onContentWidthChanged: contentX = Math.max(0, contentWidth - width)
             }
 
             BorderSurface {
               Layout.fillWidth: true; Layout.fillHeight: true
               radius: Style.cornerRadius; color: "transparent"
               borderSpec: Border.flat(Color.popups.border, 1); clip: true
+              ColumnLayout {
+                anchors.fill: parent; anchors.margins: Style.space(6); spacing: 0
+                RowLayout {
+                  Layout.fillWidth: true; Layout.preferredHeight: Style.space(28); spacing: Style.space(8)
+                  Text { Layout.fillWidth: true; text: root.searchQuery.trim() === "" ? "Name" : "Name / path"; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
+                  Text { Layout.preferredWidth: Style.space(94); text: "Size"; horizontalAlignment: Text.AlignRight; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
+                  Text { Layout.preferredWidth: Style.space(64); text: "% Parent"; horizontalAlignment: Text.AlignRight; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
+                }
+                Rectangle { Layout.fillWidth: true; height: 1; color: Color.popups.border; opacity: 0.3 }
               ListView {
                 id: treeView
-                anchors.fill: parent; anchors.margins: Style.space(6)
+                Layout.fillWidth: true; Layout.fillHeight: true
                 model: treeRows; clip: true; spacing: Style.space(2)
                 currentIndex: root.selectedTreeIndex
                 delegate: BorderSurface {
@@ -589,33 +827,50 @@ Item {
                   required property int warningCount
                   required property string warningText
                   required property string errorText
+                  required property bool hasChildren
+                  required property double percentParent
+                  required property string contextPath
+                  required property bool searchResult
                   width: treeView.width
-                  height: Math.max(Style.space(42), rowContent.implicitHeight + Style.space(10))
+                  height: searchResult ? Style.space(48) : Style.space(34)
                   radius: Style.cornerRadius
-                  color: mouse.containsMouse || root.selectedTreePath === nodePath ? Style.hoverFillFor(Color.popups.text, Color.accent) : "transparent"
+                  color: root.selectedTreePath === nodePath ? Style.selectionFillFor(Color.popups.text, Color.accent)
+                    : mouse.containsMouse ? Style.hoverFillFor(Color.popups.text, Color.accent) : "transparent"
                   borderSpec: Border.none()
-                  MouseArea { id: mouse; anchors.fill: parent; hoverEnabled: true; z: 0; onClicked: root.toggleNode(nodePath) }
+                  Rectangle { anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom; width: parent.width * percentParent / 100; color: Color.accent; opacity: 0.075; radius: parent.radius }
+                  MouseArea { id: mouse; anchors.fill: parent; hoverEnabled: true; z: 1; onClicked: searchResult ? root.chooseSearchResult(nodePath) : root.selectTreePath(nodePath, false); onDoubleClicked: if (!searchResult) root.toggleNode(nodePath) }
                   RowLayout {
-                    id: rowContent; z: 1
+                    id: rowContent; z: 2
                     anchors.fill: parent
-                    anchors.leftMargin: Style.space(8) + depth * Style.space(20)
+                    anchors.leftMargin: Style.space(8) + (searchResult ? 0 : depth * Style.space(18))
                     anchors.rightMargin: Style.space(10)
                     spacing: Style.space(8)
-                    Text { text: loading ? "◌" : expanded ? "▾" : "▸"; color: errorText !== "" ? Color.urgent : Color.popups.text; font.family: Style.font.family; font.pixelSize: Style.font.body }
-                    Text { Layout.fillWidth: true; text: nodeName; color: errorText !== "" ? Color.urgent : Color.popups.text; font.family: Style.font.family; font.pixelSize: Style.font.body; elide: Text.ElideMiddle }
+                    Item {
+                      visible: !searchResult; Layout.preferredWidth: Style.space(18); Layout.fillHeight: true; z: 3
+                      Text { anchors.centerIn: parent; text: loading ? "◌" : hasChildren ? (expanded ? "▾" : "▸") : ""; color: errorText !== "" ? Color.urgent : Color.popups.text; font.family: Style.font.family; font.pixelSize: Style.font.body }
+                      MouseArea { anchors.fill: parent; enabled: hasChildren; onClicked: function(mouse) { mouse.accepted = true; root.toggleNode(nodePath) } }
+                    }
+                    ColumnLayout {
+                      Layout.fillWidth: true; spacing: 0
+                      Text { Layout.fillWidth: true; text: nodeName; color: errorText !== "" ? Color.urgent : Color.popups.text; font.family: Style.font.family; font.pixelSize: Style.font.body; elide: Text.ElideRight }
+                      Text { Layout.fillWidth: true; visible: searchResult; text: contextPath; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; elide: Text.ElideMiddle }
+                    }
                     Text { visible: warningCount > 0; text: "⚠ " + warningCount; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
                     Button { visible: errorText !== ""; text: "Retry"; foreground: Color.urgent; onClicked: root.retryNode(nodePath) }
-                    Text { text: loading ? "Scanning…" : formattedSize; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.body; horizontalAlignment: Text.AlignRight }
+                    Text { Layout.preferredWidth: Style.space(94); text: loading ? "Scanning…" : formattedSize; color: Color.popups.text; font.family: Style.font.family; font.pixelSize: Style.font.body; horizontalAlignment: Text.AlignRight }
+                    Text { Layout.preferredWidth: Style.space(64); text: percentParent.toFixed(1) + "%"; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.body; horizontalAlignment: Text.AlignRight }
                   }
-                  ToolTip { visible: mouse.containsMouse && (warningText !== "" || errorText !== ""); text: errorText !== "" ? errorText : warningText; delay: 400 }
+                  PanelToolTip { visible: mouse.containsMouse; text: errorText !== "" ? errorText : warningText !== "" ? warningText : nodePath }
                 }
                 Text {
                   anchors.centerIn: parent
                   visible: treeRows.count === 0 && !root.discoveryLoading
-                  text: root.discoveryError !== "" ? root.discoveryError : "No directory data"
+                  text: root.discoveryError !== "" ? root.discoveryError : root.searchRunning ? "Searching snapshot…" : root.searchQuery.trim() !== "" ? "No matching directories" : "No directory data"
                   color: root.discoveryError !== "" ? Color.urgent : Color.muted
                   font.family: Style.font.family; font.pixelSize: Style.font.body
                 }
+              }
+              Text { Layout.fillWidth: true; visible: root.searchQuery.trim() !== "" && !root.searchRunning; text: root.searchMatchCount > root.searchResultLimit ? "Showing the largest " + root.searchResultLimit + " of " + root.searchMatchCount.toLocaleString() + " matches" : root.searchMatchCount.toLocaleString() + " matches"; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; horizontalAlignment: Text.AlignRight }
               }
             }
           }
