@@ -21,9 +21,12 @@ python3 helper/discover.py scan \
 ```
 
 The command emits newline-delimited JSON. It reports coarse, rate-limited
-progress, recoverable warnings, size-sorted immediate directory children, and a
-final completion record. Sending SIGTERM or SIGINT produces a `cancelled` record
-and never a successful `complete` record.
+progress and recoverable warnings, followed by one finalized `directory` record
+per directory in post-order and a final completion record. Directory records
+contain `path`, `parentPath`, allocated `bytes`, `directFilesBytes`,
+`childDirectoryCount`, and `warningCount`, allowing the QML client to construct
+the complete hierarchy without one giant JSON result. Sending SIGTERM or SIGINT
+produces a `cancelled` record and never a successful `complete` record.
 
 ## Install
 

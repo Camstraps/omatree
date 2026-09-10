@@ -163,11 +163,41 @@ def scan_directory(
     reporter: ScanReporter,
     cancellation: Cancellation,
 ) -> dict[str, Any]:
-    """Measure a directory and its immediate directory children."""
+    """Measure a complete directory tree and return its directory records."""
+    directories: list[dict[str, Any]] = []
+    summary = scan_tree(
+        path, excluded_mounts, reporter, cancellation, directories.append
+    )
+    summary["directories"] = directories
+    root = canonical_path(path)
+    summary["children"] = sorted(
+        (
+            {
+                "name": record["name"],
+                "path": record["path"],
+                "bytes": record["bytes"],
+                "kind": "directory",
+            }
+            for record in directories
+            if record["parentPath"] == root
+        ),
+        key=lambda child: (-child["bytes"], child["name"].casefold()),
+    )
+    return summary
+
+
+def scan_tree(
+    path: str,
+    excluded_mounts: set[str],
+    reporter: ScanReporter,
+    cancellation: Cancellation,
+    emit_directory: Callable[[dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Scan once and emit finalized directory aggregates in post-order."""
     root = canonical_path(path)
     exclusions = {canonical_path(item) for item in excluded_mounts}
     seen_hardlinks: set[tuple[int, int]] = set()
-    children: list[dict[str, Any]] = []
+    directory_count = 0
 
     def count_stat(stats: os.stat_result) -> int:
         if stat.S_ISREG(stats.st_mode) and stats.st_nlink > 1:
@@ -180,65 +210,87 @@ def scan_directory(
         reporter.account(value)
         return value
 
-    def measure_tree(tree_root: str, root_stats: os.stat_result) -> int:
-        total = count_stat(root_stats)
+    def open_frame(
+        directory_path: str,
+        name: str,
+        parent_path: str | None,
+        directory_bytes: int,
+    ) -> dict[str, Any]:
+        warning_start = reporter.warning_count
         try:
-            first_iterator = os.scandir(tree_root)
+            iterator = os.scandir(directory_path)
         except OSError as error:
-            reporter.warning(tree_root, error)
-            return total
-
-        stack = [first_iterator]
-        try:
-            while stack:
-                cancellation.check()
-                try:
-                    entry = next(stack[-1])
-                except StopIteration:
-                    stack.pop().close()
-                    continue
-                except OSError as error:
-                    reporter.warning(tree_root, error)
-                    stack.pop().close()
-                    continue
-
-                entry_path = entry.path
-                if is_excluded(entry_path, exclusions):
-                    continue
-                try:
-                    stats = entry.stat(follow_symlinks=False)
-                except OSError as error:
-                    reporter.warning(entry_path, error)
-                    continue
-
-                total += count_stat(stats)
-                if stat.S_ISDIR(stats.st_mode):
-                    try:
-                        stack.append(os.scandir(entry_path))
-                    except OSError as error:
-                        reporter.warning(entry_path, error)
-        finally:
-            for iterator in stack:
-                iterator.close()
-        return total
+            reporter.warning(directory_path, error)
+            iterator = None
+        return {
+            "path": directory_path,
+            "name": name,
+            "parentPath": parent_path,
+            "iterator": iterator,
+            "bytes": directory_bytes,
+            "directFilesBytes": 0,
+            "childDirectoryCount": 0,
+            "warningStart": warning_start,
+        }
 
     try:
         root_stats = os.stat(root, follow_symlinks=False)
     except OSError as error:
         reporter.warning(root, error)
-        return {"bytes": 0, "children": [], "directFilesBytes": 0}
+        return {"bytes": 0, "directFilesBytes": 0, "directoryCount": 0}
 
-    root_bytes = count_stat(root_stats)
-    direct_files_bytes = 0
+    stack = [
+        open_frame(
+            root,
+            os.path.basename(root.rstrip(os.sep)) or root,
+            None,
+            count_stat(root_stats),
+        )
+    ]
     try:
-        iterator = os.scandir(root)
-    except OSError as error:
-        reporter.warning(root, error)
-        return {"bytes": root_bytes, "children": [], "directFilesBytes": 0}
-
-    with iterator:
-        for entry in iterator:
+        while stack:
             cancellation.check()
+            frame = stack[-1]
+            iterator = frame["iterator"]
+            if iterator is None:
+                entry = None
+            else:
+                try:
+                    entry = next(iterator)
+                except StopIteration:
+                    iterator.close()
+                    frame["iterator"] = None
+                    entry = None
+                except OSError as error:
+                    reporter.warning(frame["path"], error)
+                    iterator.close()
+                    frame["iterator"] = None
+                    entry = None
+
+            if entry is None:
+                record = {
+                    "path": frame["path"],
+                    "parentPath": frame["parentPath"],
+                    "name": frame["name"],
+                    "bytes": frame["bytes"],
+                    "directFilesBytes": frame["directFilesBytes"],
+                    "childDirectoryCount": frame["childDirectoryCount"],
+                    "warningCount": reporter.warning_count - frame["warningStart"],
+                }
+                emit_directory(record)
+                directory_count += 1
+                stack.pop()
+                if stack:
+                    stack[-1]["bytes"] += record["bytes"]
+                    stack[-1]["childDirectoryCount"] += 1
+                else:
+                    return {
+                        "bytes": record["bytes"],
+                        "directFilesBytes": record["directFilesBytes"],
+                        "directoryCount": directory_count,
+                    }
+                continue
+
             entry_path = entry.path
             if is_excluded(entry_path, exclusions):
                 continue
@@ -249,25 +301,25 @@ def scan_directory(
                 continue
 
             if stat.S_ISDIR(stats.st_mode):
-                size = measure_tree(entry_path, stats)
-                children.append(
-                    {
-                        "name": entry.name,
-                        "path": entry_path,
-                        "bytes": size,
-                        "kind": "directory",
-                    }
+                stack.append(
+                    open_frame(
+                        entry_path,
+                        entry.name,
+                        frame["path"],
+                        count_stat(stats),
+                    )
                 )
             else:
-                direct_files_bytes += count_stat(stats)
+                value = count_stat(stats)
+                frame["bytes"] += value
+                frame["directFilesBytes"] += value
+    finally:
+        for frame in stack:
+            iterator = frame["iterator"]
+            if iterator is not None:
+                iterator.close()
 
-    children.sort(key=lambda child: (-child["bytes"], child["name"].casefold()))
-    total = root_bytes + direct_files_bytes + sum(child["bytes"] for child in children)
-    return {
-        "bytes": total,
-        "children": children,
-        "directFilesBytes": direct_files_bytes,
-    }
+    raise RuntimeError("directory scan ended without a root result")
 
 
 def run_json(command: list[str]) -> dict[str, Any]:
@@ -554,7 +606,15 @@ def scan_command(args: argparse.Namespace) -> int:
     )
 
     try:
-        result = scan_directory(path, exclusions, reporter, cancellation)
+        result = scan_tree(
+            path,
+            exclusions,
+            reporter,
+            cancellation,
+            lambda record: emit_ndjson(
+                {"type": "directory", "requestId": request_id, **record}
+            ),
+        )
         cancellation.check()
     except ScanCancelled:
         emit_ndjson(
@@ -569,8 +629,6 @@ def scan_command(args: argparse.Namespace) -> int:
         )
         return 130
 
-    for child in result["children"]:
-        emit_ndjson({"type": "child", "requestId": request_id, **child})
     emit_ndjson(
         {
             "type": "complete",
@@ -579,7 +637,7 @@ def scan_command(args: argparse.Namespace) -> int:
             "bytes": result["bytes"],
             "directFilesBytes": result["directFilesBytes"],
             "entries": reporter.entries,
-            "childCount": len(result["children"]),
+            "directoryCount": result["directoryCount"],
             "warningCount": reporter.warning_count,
             "suppressedWarningCount": max(0, reporter.warning_count - MAX_WARNINGS),
             "durationMs": round((time.monotonic() - started) * 1000),
@@ -592,7 +650,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="OmaTree filesystem helper")
     subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser("discover", help="emit mounted filesystems as JSON")
-    scan_parser = subparsers.add_parser("scan", help="scan one directory level")
+    scan_parser = subparsers.add_parser("scan", help="scan one filesystem tree")
     scan_parser.add_argument("--mountpoint", required=True)
     scan_parser.add_argument("--path", required=True)
     scan_parser.add_argument("--request-id", required=True)

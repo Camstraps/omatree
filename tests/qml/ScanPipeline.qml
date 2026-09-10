@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import "TreeModel.js" as TreeModel
 
 ShellRoot {
   id: root
@@ -11,31 +12,13 @@ ShellRoot {
   property string scanPath: repositoryPath
   property var queue: []
   property int queueIndex: 0
-  property var parsedChildren: []
+  property var pendingCache: ({})
+  property int directoryCount: 0
   property var complete: null
   property bool processExited: false
   property int exitCode: -1
+  property int processStarts: 0
   property var cache: ({})
-
-  function createNode(name, path, bytes, depth) {
-    return {
-      name: String(name), path: String(path), bytes: Number(bytes || 0),
-      depth: Number(depth || 0), expanded: false, loaded: false, children: []
-    }
-  }
-
-  function visibleNodes(path) {
-    var visible = []
-    function append(nodePath) {
-      var node = cache[nodePath]
-      if (!node) return
-      visible.push(node)
-      if (!node.expanded || !node.loaded) return
-      for (var i = 0; i < node.children.length; i++) append(node.children[i])
-    }
-    append(path)
-    return visible
-  }
 
   function enqueue(line) {
     queue.push(String(line || ""))
@@ -47,7 +30,11 @@ ShellRoot {
     while (queueIndex < end) {
       var message = JSON.parse(String(queue[queueIndex++]).trim())
       if (String(message.requestId || "") !== requestId) continue
-      if (message.type === "child") parsedChildren.push(message)
+      if (message.type === "directory") {
+        var error = TreeModel.stageDirectory(pendingCache, message)
+        if (error !== "") console.error("OMATREE_PIPELINE_FAIL " + error)
+        else directoryCount++
+      }
       else if (message.type === "complete") complete = message
     }
     if (queueIndex >= queue.length) {
@@ -60,21 +47,35 @@ ShellRoot {
 
   function maybeCommit() {
     if (!processExited || drainTimer.running || queue.length > 0 || !complete) return
-    var rootNode = createNode("OmaTree fixture", scanPath, complete.bytes, 0)
-    rootNode.expanded = true
-    rootNode.loaded = true
-    cache[scanPath] = rootNode
-    var paths = []
-    for (var i = 0; i < parsedChildren.length; i++) {
-      var child = createNode(parsedChildren[i].name, parsedChildren[i].path, parsedChildren[i].bytes, 1)
-      cache[child.path] = child
-      paths.push(child.path)
+    if (Number(complete.directoryCount) !== directoryCount) {
+      console.error("OMATREE_PIPELINE_FAIL incomplete"); return
     }
-    rootNode.children = paths
-    var visible = visibleNodes(scanPath)
-    if (exitCode === 0 && complete && parsedChildren.length > 0
-        && visible.length === parsedChildren.length + 1) {
-      console.log("OMATREE_PIPELINE_PASS children=" + parsedChildren.length)
+    var built = TreeModel.finalizeTree(pendingCache, directoryCount, scanPath, "fixture")
+    if (built.error !== "") { console.error("OMATREE_PIPELINE_FAIL " + built.error); return }
+    cache = built.cache
+    var rootNode = built.root
+    var sorted = true
+    for (var parentPath in cache) {
+      cache[parentPath].children.sort(function(leftPath, rightPath) {
+        return cache[rightPath].bytes - cache[leftPath].bytes
+      })
+      for (var j = 1; j < cache[parentPath].children.length; j++) {
+        if (cache[cache[parentPath].children[j - 1]].bytes
+            < cache[cache[parentPath].children[j]].bytes) sorted = false
+      }
+    }
+    var startsBeforeExpansion = processStarts
+    for (var expandPath in cache) cache[expandPath].expanded = true
+    var visible = TreeModel.visibleNodes(cache, scanPath)
+    rootNode.expanded = false
+    TreeModel.visibleNodes(cache, scanPath)
+    rootNode.expanded = true
+    var visibleAfterReexpand = TreeModel.visibleNodes(cache, scanPath)
+    if (exitCode === 0 && complete && directoryCount > 1
+        && visible.length === directoryCount && sorted
+        && visibleAfterReexpand.length === directoryCount
+        && processStarts === startsBeforeExpansion && processStarts === 1) {
+      console.log("OMATREE_PIPELINE_PASS directories=" + directoryCount)
     } else {
       console.error("OMATREE_PIPELINE_FAIL")
     }
@@ -89,6 +90,7 @@ ShellRoot {
       "--request-id", root.requestId
     ]
     running: true
+    onRunningChanged: if (running) root.processStarts++
     stdout: SplitParser { onRead: function(line) { root.enqueue(line) } }
     stderr: SplitParser { onRead: function(line) { console.error("OMATREE_PIPELINE_STDERR " + line) } }
     onExited: function(code) {

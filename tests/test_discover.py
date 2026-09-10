@@ -1,6 +1,7 @@
 import importlib.util
 import os
 from pathlib import Path
+import argparse
 import tempfile
 import unittest
 from unittest import mock
@@ -177,6 +178,33 @@ class ScanTests(unittest.TestCase):
             )
             self.assertEqual(result["children"][0]["bytes"], expected_large)
 
+            records = {record["path"]: record for record in result["directories"]}
+            self.assertEqual(records[str(nested)]["parentPath"], str(large))
+            self.assertEqual(records[str(large)]["bytes"], expected_large)
+            self.assertEqual(records[str(large)]["childDirectoryCount"], 1)
+            self.assertEqual(records[str(nested)]["directFilesBytes"], self.allocated(nested / "two"))
+            self.assertEqual(result["directoryCount"], 4)
+
+    def test_every_directory_is_emitted_once_in_postorder(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            grandchild = root / "parent" / "child"
+            grandchild.mkdir(parents=True)
+            reporter, _ = self.reporter()
+            records = []
+
+            result = discover.scan_tree(
+                str(root), set(), reporter, discover.Cancellation(), records.append
+            )
+
+            self.assertEqual(len(records), 3)
+            self.assertEqual(len({record["path"] for record in records}), 3)
+            self.assertLess(
+                next(i for i, record in enumerate(records) if record["path"] == str(grandchild)),
+                next(i for i, record in enumerate(records) if record["path"] == str(root)),
+            )
+            self.assertEqual(result["directoryCount"], 3)
+
     def test_symlinks_are_counted_but_not_followed(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
@@ -226,6 +254,7 @@ class ScanTests(unittest.TestCase):
             result, _, _ = self.scan(root, {mounted})
 
             self.assertEqual([child["name"] for child in result["children"]], ["ordinary"])
+            self.assertNotIn(str(mounted), {record["path"] for record in result["directories"]})
             self.assertEqual(
                 result["bytes"],
                 self.allocated(root) + self.allocated(ordinary) + self.allocated(ordinary / "included"),
@@ -251,6 +280,9 @@ class ScanTests(unittest.TestCase):
 
             self.assertEqual({child["name"] for child in result["children"]}, {"gone", "okay"})
             self.assertTrue(any(message["type"] == "warning" for message in messages))
+            records = {record["path"]: record for record in result["directories"]}
+            self.assertGreater(records[str(gone)]["warningCount"], 0)
+            self.assertGreater(records[str(root)]["warningCount"], 0)
 
     def test_cancellation_never_returns_a_partial_result(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -270,6 +302,62 @@ class ScanTests(unittest.TestCase):
 
             with self.assertRaises(discover.ScanCancelled):
                 self.scan(root, cancellation=CancelAfterFirstCheck())
+
+    def test_scan_command_streams_directories_before_complete(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "child").mkdir()
+            (root / "child" / "data").write_bytes(b"x" * 4096)
+            messages = []
+            args = argparse.Namespace(
+                mountpoint=str(root), path=str(root), request_id="full-tree"
+            )
+            findmnt = {"filesystems": [{"target": str(root)}]}
+
+            with mock.patch.object(discover, "run_json", return_value=findmnt), mock.patch.object(
+                discover, "emit_ndjson", side_effect=messages.append
+            ):
+                exit_code = discover.scan_command(args)
+
+            self.assertEqual(exit_code, 0)
+            types = [message["type"] for message in messages]
+            self.assertEqual(types[0], "start")
+            self.assertEqual(types[-1], "complete")
+            self.assertEqual(types.count("directory"), 2)
+            self.assertNotIn("child", types)
+            self.assertEqual(messages[-1]["directoryCount"], 2)
+
+    def test_cancelled_scan_command_never_emits_complete(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "child").mkdir()
+            (root / "child" / "data").write_bytes(b"x" * 4096)
+            messages = []
+            args = argparse.Namespace(
+                mountpoint=str(root), path=str(root), request_id="cancel-tree"
+            )
+            findmnt = {"filesystems": [{"target": str(root)}]}
+
+            class CancelDuringScan(discover.Cancellation):
+                def __init__(self):
+                    super().__init__()
+                    self.checks = 0
+
+                def check(self):
+                    self.checks += 1
+                    if self.checks > 2:
+                        raise discover.ScanCancelled
+
+            with mock.patch.object(discover, "run_json", return_value=findmnt), mock.patch.object(
+                discover, "emit_ndjson", side_effect=messages.append
+            ), mock.patch.object(discover, "Cancellation", CancelDuringScan), mock.patch.object(
+                discover.signal, "signal"
+            ):
+                exit_code = discover.scan_command(args)
+
+            self.assertEqual(exit_code, 130)
+            self.assertIn("cancelled", [message["type"] for message in messages])
+            self.assertNotIn("complete", [message["type"] for message in messages])
 
     def test_allocated_size_is_used_for_sparse_files(self):
         with tempfile.TemporaryDirectory() as temp:
