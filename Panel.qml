@@ -31,6 +31,7 @@ Item {
   property string activePath: ""
   property int activeGeneration: -1
   property var activeDirectoryCache: ({})
+  property var activePendingChildren: ({})
   property int activeDirectoryCount: 0
   property int activeWarningCount: 0
   property string activeFirstWarning: ""
@@ -202,6 +203,7 @@ Item {
     activePath = request.path
     activeGeneration = request.generation
     activeDirectoryCache = ({})
+    activePendingChildren = ({})
     activeDirectoryCount = 0
     activeWarningCount = 0
     activeFirstWarning = ""
@@ -262,7 +264,7 @@ Item {
       activeWarningCount++
       if (activeFirstWarning === "") activeFirstWarning = String(message.error || "Some paths could not be read.")
     } else if (message.type === "directory") {
-      var directoryError = TreeModel.stageDirectory(activeDirectoryCache, {
+      var directoryError = TreeModel.stageDirectory(activeDirectoryCache, activePendingChildren, {
         name: String(message.name || message.path || "Directory"),
         path: String(message.path || ""),
         parentPath: message.parentPath === null ? null : String(message.parentPath || ""),
@@ -316,17 +318,29 @@ Item {
           && activeProtocolError === "" && activeExitCode === 0) {
         var expectedCount = Number(activeComplete.directoryCount || 0)
         var built = expectedCount === activeDirectoryCount
-          ? TreeModel.finalizeTree(activeDirectoryCache, activeDirectoryCount, path, node.name)
+          ? TreeModel.finalizeTree(
+              activeDirectoryCache, activePendingChildren,
+              activeDirectoryCount, path, node.name)
           : { error: "Scanner returned an incomplete directory tree." }
         if (built.error !== "") {
           node.error = built.error
         } else {
           treeCache = built.cache
-          treeCache[path].requestId = ""
-          treeCache[path].warningCount = Number(activeComplete.warningCount || activeWarningCount)
-          treeCache[path].warningText = treeCache[path].warningCount > 0
-            ? String(treeCache[path].warningCount) + " path" + (treeCache[path].warningCount === 1 ? "" : "s") + " could not be read"
+          var completedRoot = treeCache[path]
+          completedRoot.expanded = true
+          completedRoot.requestId = ""
+          completedRoot.warningCount = Number(activeComplete.warningCount || activeWarningCount)
+          completedRoot.warningText = completedRoot.warningCount > 0
+            ? String(completedRoot.warningCount) + " path" + (completedRoot.warningCount === 1 ? "" : "s") + " could not be read"
             : ""
+          var committedRows = TreeModel.visibleNodes(treeCache, path)
+          console.info("OmaTree tree commit root=" + path
+            + " staged=" + activeDirectoryCount
+            + " scannerRootChildren=" + completedRoot.childDirectoryCount
+            + " linkedRootChildren=" + completedRoot.children.length
+            + " firstRootChildren=" + completedRoot.children.slice(0, 10).join(",")
+            + " visibleRows=" + committedRows.length
+            + " expanded=" + completedRoot.expanded)
         }
       } else if (!activeExpectedStop && !activeCancelled) {
         node.error = activeProtocolError || activeStderr || "Directory scan failed."
@@ -337,6 +351,7 @@ Item {
     activePath = ""
     activeGeneration = -1
     activeDirectoryCache = ({})
+    activePendingChildren = ({})
     activeDirectoryCount = 0
     activeComplete = null
     scanLineQueue = []

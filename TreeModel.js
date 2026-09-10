@@ -22,7 +22,7 @@ function createNode(name, path, bytes, depth, directFilesBytes) {
   }
 }
 
-function stageDirectory(cache, record) {
+function stageDirectory(cache, pendingChildren, record) {
   var path = String(record.path || "")
   if (!path || cache[path]) return "Scanner returned duplicate or empty directory paths."
   var node = createNode(record.name, path, record.bytes, 0, record.directFilesBytes)
@@ -33,34 +33,28 @@ function stageDirectory(cache, record) {
   node.warningText = node.warningCount > 0
     ? String(node.warningCount) + " path" + (node.warningCount === 1 ? "" : "s") + " could not be read"
     : ""
+  node.children = pendingChildren[path] || []
+  delete pendingChildren[path]
   cache[path] = node
+  if (node.parentPath !== "") {
+    if (cache[node.parentPath]) cache[node.parentPath].children.push(path)
+    else {
+      if (!pendingChildren[node.parentPath]) pendingChildren[node.parentPath] = []
+      pendingChildren[node.parentPath].push(path)
+    }
+  }
   return ""
 }
 
-function finalizeTree(cache, recordCount, rootPath, rootName) {
+function finalizeTree(cache, pendingChildren, recordCount, rootPath, rootName) {
   var root = cache[rootPath]
   if (!root) return { error: "Scanner did not return the filesystem root directory." }
   root.name = String(rootName || root.name)
   root.parentPath = ""
   root.expanded = true
 
-  for (var childPath in cache) {
-    var child = cache[childPath]
-    if (childPath === rootPath) continue
-    var parent = cache[child.parentPath]
-    if (!parent) return { error: "Scanner returned a directory with no parent." }
-    parent.children.push(childPath)
-  }
-  for (var parentPath in cache) {
-    if (cache[parentPath].children.length !== cache[parentPath].childDirectoryCount)
-      return { error: "Scanner returned an inconsistent directory hierarchy." }
-    cache[parentPath].children.sort(function(leftPath, rightPath) {
-      var left = cache[leftPath]
-      var right = cache[rightPath]
-      if (left.bytes !== right.bytes) return right.bytes - left.bytes
-      return left.name.toLocaleLowerCase().localeCompare(right.name.toLocaleLowerCase())
-    })
-  }
+  for (var unresolvedParent in pendingChildren)
+    return { error: "Scanner returned a directory with no parent: " + unresolvedParent }
 
   var visited = ({})
   var stack = [{ path: rootPath, depth: 0 }]
@@ -70,8 +64,17 @@ function finalizeTree(cache, recordCount, rootPath, rootName) {
     if (visited[item.path]) return { error: "Scanner returned a cyclic directory hierarchy." }
     visited[item.path] = true
     visitedCount++
-    cache[item.path].depth = item.depth
-    var children = cache[item.path].children
+    var current = cache[item.path]
+    current.depth = item.depth
+    if (current.children.length !== current.childDirectoryCount)
+      return { error: "Scanner returned an inconsistent directory hierarchy." }
+    current.children.sort(function(leftPath, rightPath) {
+      var left = cache[leftPath]
+      var right = cache[rightPath]
+      if (left.bytes !== right.bytes) return right.bytes - left.bytes
+      return left.name.toLocaleLowerCase().localeCompare(right.name.toLocaleLowerCase())
+    })
+    var children = current.children
     for (var j = children.length - 1; j >= 0; j--)
       stack.push({ path: children[j], depth: item.depth + 1 })
   }
@@ -82,11 +85,12 @@ function finalizeTree(cache, recordCount, rootPath, rootName) {
 
 function buildTree(records, rootPath, rootName) {
   var cache = ({})
+  var pendingChildren = ({})
   for (var i = 0; i < records.length; i++) {
-    var error = stageDirectory(cache, records[i])
+    var error = stageDirectory(cache, pendingChildren, records[i])
     if (error !== "") return { error: error }
   }
-  return finalizeTree(cache, records.length, rootPath, rootName)
+  return finalizeTree(cache, pendingChildren, records.length, rootPath, rootName)
 }
 
 function visibleNodes(cache, rootPath) {

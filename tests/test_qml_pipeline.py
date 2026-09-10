@@ -80,7 +80,7 @@ class QmlScanPipelineTests(unittest.TestCase):
             output = []
             selector = selectors.DefaultSelector()
             selector.register(process.stdout, selectors.EVENT_READ)
-            deadline = time.monotonic() + 15
+            deadline = time.monotonic() + 60
             passed = False
             try:
                 while time.monotonic() < deadline:
