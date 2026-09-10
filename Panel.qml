@@ -283,8 +283,16 @@ Item {
       scanDrainTimer.stop()
       scanLineQueue = []
       scanLineQueueIndex = 0
-      if (scanProcessExited) scanSettleTimer.restart()
+      maybeSettleScan()
     }
+  }
+
+  function maybeSettleScan() {
+    if (!scanProcessExited || scanLineQueue.length > 0 || scanDrainTimer.running) return
+    // A successful helper run always ends with a complete record. Waiting for
+    // that terminal record also handles onExited arriving before SplitParser.
+    if (activeExpectedStop || activeCancelled || activeComplete
+        || activeProtocolError !== "" || activeExitCode !== 0) settleScan()
   }
 
   function settleScan() {
@@ -379,12 +387,13 @@ Item {
     onExited: function(exitCode) {
       root.activeExitCode = exitCode
       root.scanProcessExited = true
-      if (root.scanLineQueue.length === 0) scanSettleTimer.restart()
+      root.maybeSettleScan()
     }
   }
 
-  Timer { id: scanDrainTimer; interval: 0; repeat: true; onTriggered: root.drainScanLines() }
-  Timer { id: scanSettleTimer; interval: 50; repeat: false; onTriggered: root.settleScan() }
+  // Qt timers do not run with a zero interval in the installed Quickshell/Qt
+  // combination. One millisecond retains batched UI updates without stalling.
+  Timer { id: scanDrainTimer; interval: 1; repeat: true; onTriggered: root.drainScanLines() }
 
   PanelWindow {
     id: window
