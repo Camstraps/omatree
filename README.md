@@ -20,13 +20,13 @@ Omarchy/Quickshell panel and optional bar widget.
 
 ## Screenshots
 
-<!-- Add screenshots when available:
-![OmaTree panel](docs/screenshots/panel.png)
-![OmaTree bar widget](docs/screenshots/bar-widget.png)
--->
+### Disk usage overview
 
-Screenshots are coming soon.
+![OmaTree disk usage overview](assets/omatree-overview.png)
 
+### Directory navigation
+
+![OmaTree directory navigation](assets/omatree-navigation.png)
 ## Requirements
 
 - Omarchy Quattro (tested with Omarchy 4.0.3)
