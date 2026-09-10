@@ -1,0 +1,5 @@
+[
+  {"type":"start","requestId":"cancelled","path":"/root","mountpoint":"/root","excludedMountpoints":[]},
+  {"type":"directory","requestId":"cancelled","path":"/root/partial","parentPath":"/root","name":"partial","bytes":10,"directFilesBytes":10,"childDirectoryCount":0,"warningCount":0},
+  {"type":"cancelled","requestId":"cancelled","path":"/root","entries":2,"bytes":10,"durationMs":3}
+]

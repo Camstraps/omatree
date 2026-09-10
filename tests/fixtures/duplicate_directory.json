@@ -1,0 +1,6 @@
+[
+  {"type":"start","requestId":"duplicate","path":"/root","mountpoint":"/root","excludedMountpoints":[]},
+  {"type":"directory","requestId":"duplicate","path":"/root","parentPath":null,"name":"root","bytes":1,"directFilesBytes":1,"childDirectoryCount":0,"warningCount":0},
+  {"type":"directory","requestId":"duplicate","path":"/root","parentPath":null,"name":"root","bytes":1,"directFilesBytes":1,"childDirectoryCount":0,"warningCount":0},
+  {"type":"complete","requestId":"duplicate","path":"/root","bytes":1,"directFilesBytes":1,"entries":1,"directoryCount":2,"warningCount":0,"suppressedWarningCount":0,"durationMs":1}
+]

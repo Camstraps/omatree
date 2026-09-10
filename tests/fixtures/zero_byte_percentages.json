@@ -1,0 +1,6 @@
+[
+  {"type":"start","requestId":"zero","path":"/zero","mountpoint":"/zero","excludedMountpoints":[]},
+  {"type":"directory","requestId":"zero","path":"/zero/child","parentPath":"/zero","name":"child","bytes":0,"directFilesBytes":0,"childDirectoryCount":0,"warningCount":0},
+  {"type":"directory","requestId":"zero","path":"/zero","parentPath":null,"name":"zero","bytes":0,"directFilesBytes":0,"childDirectoryCount":1,"warningCount":0},
+  {"type":"complete","requestId":"zero","path":"/zero","bytes":0,"directFilesBytes":0,"entries":2,"directoryCount":2,"warningCount":0,"suppressedWarningCount":0,"durationMs":1}
+]

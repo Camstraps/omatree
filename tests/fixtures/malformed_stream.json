@@ -1,0 +1,4 @@
+[
+  {"type":"start","requestId":"malformed","path":"/root","mountpoint":"/root","excludedMountpoints":[]},
+  {"requestId":"malformed","path":"/root"}
+]

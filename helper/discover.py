@@ -9,7 +9,9 @@ import signal
 import subprocess
 import sys
 import time
+from typing import Any
 
+from omatree_core import protocol
 from omatree_core.discovery import (
     build_discovery,
     discover,
@@ -34,7 +36,7 @@ from omatree_core.scanner import (
 
 
 def emit_ndjson(message: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(message, separators=(",", ":")) + "\n")
+    sys.stdout.write(protocol.encode_ndjson(message))
     sys.stdout.flush()
 
 
@@ -45,14 +47,7 @@ def scan_command(args: argparse.Namespace) -> int:
 
     validation_error = validate_scan_root(path, mountpoint)
     if validation_error is not None:
-        emit_ndjson(
-            {
-                "type": "error",
-                "requestId": request_id,
-                "path": path,
-                "error": validation_error,
-            }
-        )
+        emit_ndjson(protocol.error_event(request_id, path, validation_error))
         return 2
 
     findmnt_data = run_json(
@@ -66,14 +61,11 @@ def scan_command(args: argparse.Namespace) -> int:
     )
     exclusions = descendant_mountpoints(mountpoint, findmnt_data)
     if is_excluded(path, exclusions):
-        emit_ndjson(
-            {
-                "type": "error",
-                "requestId": request_id,
-                "path": path,
-                "error": "scan path belongs to a descendant mounted filesystem",
-            }
-        )
+        emit_ndjson(protocol.error_event(
+            request_id,
+            path,
+            "scan path belongs to a descendant mounted filesystem",
+        ))
         return 2
 
     cancellation = Cancellation()
@@ -81,15 +73,9 @@ def scan_command(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGINT, cancellation.cancel)
     reporter = ScanReporter(request_id, emit_ndjson)
     started = time.monotonic()
-    emit_ndjson(
-        {
-            "type": "start",
-            "requestId": request_id,
-            "path": path,
-            "mountpoint": mountpoint,
-            "excludedMountpoints": sorted(exclusions),
-        }
-    )
+    emit_ndjson(protocol.start_event(
+        request_id, path, mountpoint, sorted(exclusions)
+    ))
 
     try:
         result = scan_tree(
@@ -97,38 +83,30 @@ def scan_command(args: argparse.Namespace) -> int:
             exclusions,
             reporter,
             cancellation,
-            lambda record: emit_ndjson(
-                {"type": "directory", "requestId": request_id, **record}
-            ),
+            lambda record: emit_ndjson(protocol.directory_event(request_id, record)),
         )
         cancellation.check()
     except ScanCancelled:
-        emit_ndjson(
-            {
-                "type": "cancelled",
-                "requestId": request_id,
-                "path": path,
-                "entries": reporter.entries,
-                "bytes": reporter.bytes,
-                "durationMs": round((time.monotonic() - started) * 1000),
-            }
-        )
+        emit_ndjson(protocol.cancelled_event(
+            request_id,
+            path,
+            reporter.entries,
+            reporter.bytes,
+            round((time.monotonic() - started) * 1000),
+        ))
         return 130
 
-    emit_ndjson(
-        {
-            "type": "complete",
-            "requestId": request_id,
-            "path": path,
-            "bytes": result["bytes"],
-            "directFilesBytes": result["directFilesBytes"],
-            "entries": reporter.entries,
-            "directoryCount": result["directoryCount"],
-            "warningCount": reporter.warning_count,
-            "suppressedWarningCount": max(0, reporter.warning_count - MAX_WARNINGS),
-            "durationMs": round((time.monotonic() - started) * 1000),
-        }
-    )
+    emit_ndjson(protocol.complete_event(
+        request_id,
+        path,
+        result["bytes"],
+        result["directFilesBytes"],
+        reporter.entries,
+        result["directoryCount"],
+        reporter.warning_count,
+        max(0, reporter.warning_count - MAX_WARNINGS),
+        round((time.monotonic() - started) * 1000),
+    ))
     return 0
 
 
@@ -146,14 +124,9 @@ def main() -> int:
         try:
             return scan_command(args)
         except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
-            emit_ndjson(
-                {
-                    "type": "error",
-                    "requestId": args.request_id,
-                    "path": canonical_path(args.path),
-                    "error": str(error),
-                }
-            )
+            emit_ndjson(protocol.error_event(
+                args.request_id, canonical_path(args.path), error
+            ))
             return 1
 
     try:

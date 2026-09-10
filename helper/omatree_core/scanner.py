@@ -7,6 +7,7 @@ import stat
 import time
 from typing import Any, Callable
 
+from . import protocol
 from .paths import canonical_path, is_excluded
 
 
@@ -51,23 +52,15 @@ class ScanReporter:
         self.bytes += allocated_bytes
         now = self.clock()
         if now - self._last_progress >= self.progress_interval:
-            self.emit({
-                "type": "progress",
-                "requestId": self.request_id,
-                "entries": self.entries,
-                "bytes": self.bytes,
-            })
+            self.emit(protocol.progress_event(
+                self.request_id, self.entries, self.bytes
+            ))
             self._last_progress = now
 
     def warning(self, path: str, error: OSError | str) -> None:
         self.warning_count += 1
         if self.warning_count <= MAX_WARNINGS:
-            self.emit({
-                "type": "warning",
-                "requestId": self.request_id,
-                "path": path,
-                "error": str(error),
-            })
+            self.emit(protocol.warning_event(self.request_id, path, error))
 
 
 def allocated_size(stats: os.stat_result) -> int:

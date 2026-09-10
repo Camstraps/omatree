@@ -25,8 +25,76 @@ ShellRoot {
   property var cache: ({})
   property bool postorderFixturePassed: false
   property bool uxModelFixturePassed: false
+  property bool sharedValidPassed: false
+  property bool sharedDuplicatePassed: false
+  property bool sharedMissingParentPassed: false
+  property bool sharedChildCountPassed: false
+  readonly property bool sharedFixturePassed: sharedValidPassed
+    && sharedDuplicatePassed && sharedMissingParentPassed && sharedChildCountPassed
 
   ListModel { id: visibleRows }
+
+  FileView {
+    path: root.repositoryPath + "/tests/fixtures/valid_completed_scan.json"
+    printErrors: true
+    onLoaded: {
+      root.verifySharedFixture(JSON.parse(text()))
+      if (root.complete) root.maybeCommit()
+    }
+  }
+
+  FileView {
+    path: root.repositoryPath + "/tests/fixtures/duplicate_directory.json"
+    printErrors: true
+    onLoaded: {
+      root.sharedDuplicatePassed = root.fixtureError(JSON.parse(text())).indexOf("duplicate") !== -1
+      if (root.complete) root.maybeCommit()
+    }
+  }
+
+  FileView {
+    path: root.repositoryPath + "/tests/fixtures/missing_parent.json"
+    printErrors: true
+    onLoaded: {
+      root.sharedMissingParentPassed = root.fixtureError(JSON.parse(text())).indexOf("no parent") !== -1
+      if (root.complete) root.maybeCommit()
+    }
+  }
+
+  FileView {
+    path: root.repositoryPath + "/tests/fixtures/child_count_mismatch.json"
+    printErrors: true
+    onLoaded: {
+      root.sharedChildCountPassed = root.fixtureError(JSON.parse(text())).indexOf("inconsistent") !== -1
+      if (root.complete) root.maybeCommit()
+    }
+  }
+
+  function fixtureError(events) {
+    var records = []
+    for (var i = 0; i < events.length; i++) {
+      if (events[i].type === "directory") records.push(events[i])
+    }
+    return String(TreeModel.buildTree(records, String(events[0].path), "fixture").error || "")
+  }
+
+  function verifySharedFixture(events) {
+    var records = []
+    for (var i = 0; i < events.length; i++) {
+      if (events[i].type === "directory") records.push(events[i])
+    }
+    var built = TreeModel.buildTree(records, "/root", "root")
+    if (built.error !== "") return
+    var search = TreeModel.searchMatches(built.cache, "A", 2)
+    sharedValidPassed = built.root.children.join(",") === "/root/alpha,/root/beta"
+      && TreeModel.percentageOfParent(built.cache, "/root/alpha", 100) === 40
+      && TreeModel.percentageOfParent(built.cache, "/root/alpha/leaf", 100) === 50
+      && TreeModel.ancestorPaths(built.cache, "/root/alpha/leaf").join(",")
+        === "/root,/root/alpha,/root/alpha/leaf"
+      && search.total === 3 && search.matches.length === 2
+      && search.matches[0].path === "/root/alpha"
+      && search.matches[1].path === "/root/beta"
+  }
 
   function rebuildRows(tree, rootPath) {
     var visible = TreeModel.visibleNodes(tree, rootPath)
@@ -173,7 +241,7 @@ ShellRoot {
         && visibleAfterReexpand.length === directoryCount
         && initialVisibleRowCount === rootNode.children.length + 1
         && processStarts === startsBeforeExpansion && processStarts === 1
-        && postorderFixturePassed && uxModelFixturePassed) {
+        && postorderFixturePassed && uxModelFixturePassed && sharedFixturePassed) {
       console.log("OMATREE_PIPELINE_PASS directories=" + directoryCount
                   + " rootChildren=" + rootNode.children.length
                   + " first=" + rootNode.children.slice(0, 10).join(","))

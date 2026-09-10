@@ -1,0 +1,8 @@
+[
+  {"type":"start","requestId":"valid","path":"/root","mountpoint":"/root","excludedMountpoints":[]},
+  {"type":"directory","requestId":"valid","path":"/root/alpha/leaf","parentPath":"/root/alpha","name":"leaf","bytes":20,"directFilesBytes":20,"childDirectoryCount":0,"warningCount":0},
+  {"type":"directory","requestId":"valid","path":"/root/alpha","parentPath":"/root","name":"Alpha","bytes":40,"directFilesBytes":20,"childDirectoryCount":1,"warningCount":0},
+  {"type":"directory","requestId":"valid","path":"/root/beta","parentPath":"/root","name":"beta","bytes":40,"directFilesBytes":40,"childDirectoryCount":0,"warningCount":0},
+  {"type":"directory","requestId":"valid","path":"/root","parentPath":null,"name":"root","bytes":100,"directFilesBytes":20,"childDirectoryCount":2,"warningCount":0},
+  {"type":"complete","requestId":"valid","path":"/root","bytes":100,"directFilesBytes":20,"entries":4,"directoryCount":4,"warningCount":0,"suppressedWarningCount":0,"durationMs":5}
+]

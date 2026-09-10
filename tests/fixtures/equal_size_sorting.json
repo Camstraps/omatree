@@ -1,0 +1,8 @@
+[
+  {"type":"start","requestId":"sorting","path":"/root","mountpoint":"/root","excludedMountpoints":[]},
+  {"type":"directory","requestId":"sorting","path":"/root/zulu","parentPath":"/root","name":"zulu","bytes":10,"directFilesBytes":10,"childDirectoryCount":0,"warningCount":0},
+  {"type":"directory","requestId":"sorting","path":"/root/Alpha","parentPath":"/root","name":"Alpha","bytes":10,"directFilesBytes":10,"childDirectoryCount":0,"warningCount":0},
+  {"type":"directory","requestId":"sorting","path":"/root/middle","parentPath":"/root","name":"middle","bytes":20,"directFilesBytes":20,"childDirectoryCount":0,"warningCount":0},
+  {"type":"directory","requestId":"sorting","path":"/root","parentPath":null,"name":"root","bytes":40,"directFilesBytes":0,"childDirectoryCount":3,"warningCount":0},
+  {"type":"complete","requestId":"sorting","path":"/root","bytes":40,"directFilesBytes":0,"entries":4,"directoryCount":4,"warningCount":0,"suppressedWarningCount":0,"durationMs":1}
+]

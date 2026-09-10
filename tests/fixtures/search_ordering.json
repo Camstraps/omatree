@@ -1,0 +1,9 @@
+[
+  {"type":"start","requestId":"search","path":"/root","mountpoint":"/root","excludedMountpoints":[]},
+  {"type":"directory","requestId":"search","path":"/root/data-small","parentPath":"/root","name":"Data small","bytes":10,"directFilesBytes":10,"childDirectoryCount":0,"warningCount":0},
+  {"type":"directory","requestId":"search","path":"/root/z-data","parentPath":"/root","name":"Data large Z","bytes":30,"directFilesBytes":30,"childDirectoryCount":0,"warningCount":0},
+  {"type":"directory","requestId":"search","path":"/root/a-data","parentPath":"/root","name":"Data large A","bytes":30,"directFilesBytes":30,"childDirectoryCount":0,"warningCount":0},
+  {"type":"directory","requestId":"search","path":"/root/other","parentPath":"/root","name":"other","bytes":50,"directFilesBytes":50,"childDirectoryCount":0,"warningCount":0},
+  {"type":"directory","requestId":"search","path":"/root","parentPath":null,"name":"root","bytes":120,"directFilesBytes":0,"childDirectoryCount":4,"warningCount":0},
+  {"type":"complete","requestId":"search","path":"/root","bytes":120,"directFilesBytes":0,"entries":5,"directoryCount":5,"warningCount":0,"suppressedWarningCount":0,"durationMs":1}
+]
