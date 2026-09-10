@@ -1,17 +1,23 @@
 import importlib.util
+import json
 import os
 from pathlib import Path
 import argparse
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
 
 HELPER_PATH = Path(__file__).parents[1] / "helper" / "discover.py"
+sys.path.insert(0, str(HELPER_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("omatree_discover", HELPER_PATH)
 assert SPEC and SPEC.loader
 discover = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(discover)
+
+from omatree_core import paths, scanner
 
 
 def fake_capacity(path):
@@ -275,7 +281,7 @@ class ScanTests(unittest.TestCase):
                 return real_scandir(path)
 
             reporter, messages = self.reporter()
-            with mock.patch.object(discover.os, "scandir", side_effect=flaky_scandir):
+            with mock.patch.object(scanner.os, "scandir", side_effect=flaky_scandir):
                 result = discover.scan_directory(str(root), set(), reporter, discover.Cancellation())
 
             self.assertEqual({child["name"] for child in result["children"]}, {"gone", "okay"})
@@ -370,6 +376,79 @@ class ScanTests(unittest.TestCase):
 
             self.assertEqual(result["directFilesBytes"], self.allocated(sparse))
             self.assertLess(result["directFilesBytes"], sparse.stat().st_size)
+
+
+class PathPolicyTests(unittest.TestCase):
+    def test_sibling_prefix_is_not_within_mountpoint(self):
+        self.assertTrue(paths.path_is_within("/home/user/data", "/home"))
+        self.assertFalse(paths.path_is_within("/home2/user/data", "/home"))
+
+    def test_scan_root_outside_mountpoint_is_rejected(self):
+        self.assertEqual(
+            paths.validate_scan_root("/home2/data", "/home"),
+            "scan path is outside the selected filesystem mountpoint",
+        )
+
+    def test_scan_root_with_symlink_component_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            real = base / "real"
+            real.mkdir()
+            child = real / "child"
+            child.mkdir()
+            link = base / "link"
+            link.symlink_to(real, target_is_directory=True)
+
+            self.assertEqual(
+                paths.validate_scan_root(str(link / "child"), str(base)),
+                "scan path may not contain symbolic-link components",
+            )
+
+    def test_descendant_mounts_exclude_nested_but_not_sibling_prefixes(self):
+        findmnt = {
+            "filesystems": [{
+                "target": "/home",
+                "children": [
+                    {"target": "/home/user/nested"},
+                    {"target": "/home2"},
+                ],
+            }]
+        }
+
+        self.assertEqual(
+            paths.descendant_mountpoints("/home", findmnt),
+            {"/home/user/nested"},
+        )
+
+
+class CliCompatibilityTests(unittest.TestCase):
+    def test_scan_command_line_and_ndjson_contract(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "child").mkdir()
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    str(HELPER_PATH),
+                    "scan",
+                    "--mountpoint",
+                    str(root),
+                    "--path",
+                    str(root),
+                    "--request-id",
+                    "cli-compatibility",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            messages = [json.loads(line) for line in process.stdout.splitlines()]
+            self.assertEqual(process.returncode, 0, process.stderr)
+            self.assertEqual(messages[0]["type"], "start")
+            self.assertEqual(messages[-1]["type"], "complete")
+            self.assertTrue(all(message["requestId"] == "cli-compatibility" for message in messages))
+            self.assertEqual([message["type"] for message in messages].count("directory"), 2)
 
 
 if __name__ == "__main__":
