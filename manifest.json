@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.camstraps.omatree",
+  "name": "OmaTree",
+  "version": "0.1.0",
+  "author": "Camstraps",
+  "license": "MIT",
+  "description": "A native Omarchy disk usage analyzer inspired by TreeSize and ncdu.",
+  "kinds": [
+    "panel"
+  ],
+  "entryPoints": {
+    "panel": "Panel.qml"
+  }
+}
