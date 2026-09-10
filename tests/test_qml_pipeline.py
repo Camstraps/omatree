@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import selectors
@@ -12,6 +13,19 @@ REPOSITORY = Path(__file__).resolve().parents[1]
 
 
 class QmlScanPipelineTests(unittest.TestCase):
+    def test_bar_widget_manifest_and_safety_contract(self):
+        manifest = json.loads((REPOSITORY / "manifest.json").read_text(encoding="utf-8"))
+        widget = (REPOSITORY / "BarWidget.qml").read_text(encoding="utf-8")
+        self.assertIn("panel", manifest["kinds"])
+        self.assertIn("bar-widget", manifest["kinds"])
+        self.assertEqual(manifest["entryPoints"]["barWidget"], "BarWidget.qml")
+        self.assertIn('bar.shell.summon(moduleName, "{}")', widget)
+        self.assertIn("displayMode = (displayMode + 1) % 4", widget)
+        self.assertIn("totalBytes > 0", widget)
+        self.assertIn('["python3", helperPath, "discover"]', widget)
+        self.assertNotIn('"scan"', widget)
+        self.assertNotIn("requestScan", widget)
+
     def test_panel_uses_a_runnable_queue_timer(self):
         panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
         self.assertIn(

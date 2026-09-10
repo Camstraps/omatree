@@ -7,9 +7,17 @@
   "license": "MIT",
   "description": "A native Omarchy disk usage analyzer inspired by TreeSize and ncdu.",
   "kinds": [
-    "panel"
+    "panel",
+    "bar-widget"
   ],
   "entryPoints": {
-    "panel": "Panel.qml"
+    "panel": "Panel.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaTree",
+    "description": "Filesystem capacity and OmaTree launcher",
+    "category": "System",
+    "allowMultiple": false
   }
 }
