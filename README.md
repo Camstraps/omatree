@@ -99,6 +99,26 @@ The bar widget shows the filesystem containing `$HOME`. Left click opens
 OmaTree; right click cycles between percentage used, used space, free space,
 and detailed display modes.
 
+## Terminal interface
+
+OmaTree also includes an initial curses-based terminal frontend. Run it from
+the repository with the default `$HOME` target or an explicit directory:
+
+```bash
+./bin/omatree
+./bin/omatree ~/Downloads
+```
+
+Use Up/Down or `k`/`j` to move, Enter/Right/`l` to expand, and Left/`h` to
+collapse or select the parent. Backspace selects the parent; Home, End, Page
+Up, and Page Down provide longer-distance navigation. Press `r` to rescan and
+`q` to quit. During scanning, `q` or Ctrl-C cancels without committing a
+partial result.
+
+The terminal and Quickshell interfaces use the same filesystem discovery,
+mount-boundary policy, recursive scanner, allocated-size accounting, and
+directory snapshot semantics.
+
 ## Performance
 
 The initial scan can take time on filesystems containing millions of entries.

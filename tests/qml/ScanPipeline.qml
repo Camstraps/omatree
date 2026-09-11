@@ -253,7 +253,7 @@ ShellRoot {
   Process {
     id: scanProcess
     command: [
-      "python3", root.helperPath, "scan",
+      "/usr/bin/python3", root.helperPath, "scan",
       "--mountpoint", root.mountpoint,
       "--path", root.scanPath,
       "--request-id", root.requestId

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
 from . import protocol
+from .resources import DEFAULT_LIMITS, ResourceLimitExceeded, ResourceLimits, check_path
 
 
 class SnapshotError(ValueError):
@@ -80,7 +81,8 @@ class Snapshot:
 class SnapshotBuilder:
     """Stage records privately and publish a Snapshot only after validation."""
 
-    def __init__(self) -> None:
+    def __init__(self, limits: ResourceLimits = DEFAULT_LIMITS) -> None:
+        self._limits = limits
         self._directories: dict[str, Directory] = {}
         self._pending_children: dict[str, list[str]] = {}
 
@@ -90,6 +92,13 @@ class SnapshotBuilder:
             raise SnapshotError("Scanner returned duplicate or empty directory paths.")
         parent_value = record.get("parentPath")
         parent_path = "" if parent_value is None else str(parent_value or "")
+        check_path(path, self._limits)
+        if parent_path:
+            check_path(parent_path, self._limits)
+        if len(self._directories) >= self._limits.max_directories:
+            raise ResourceLimitExceeded(
+                "directories", self._limits.max_directories
+            )
         node = Directory(
             name=str(record.get("name") or path),
             path=path,
@@ -151,9 +160,12 @@ class SnapshotBuilder:
         return Snapshot(self._directories, root_path)
 
 
-def snapshot_from_events(events: Iterable[Mapping[str, Any]]) -> Snapshot:
+def snapshot_from_events(
+    events: Iterable[Mapping[str, Any]],
+    limits: ResourceLimits = DEFAULT_LIMITS,
+) -> Snapshot:
     """Atomically build a snapshot from one complete, well-formed scan stream."""
-    builder = SnapshotBuilder()
+    builder = SnapshotBuilder(limits)
     request_id: str | None = None
     root_path: str | None = None
     directory_count = 0

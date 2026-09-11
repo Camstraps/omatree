@@ -7,6 +7,7 @@ import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 import "TreeModel.js" as TreeModel
+import "FrontendSafety.js" as FrontendSafety
 
 Item {
   id: root
@@ -17,6 +18,12 @@ Item {
   property bool discoveryLoading: false
   property string discoveryError: ""
   property string discoveryStderr: ""
+  property string discoveryStdout: ""
+  property int discoveryStdoutBytes: 0
+  property int discoveryStderrBytes: 0
+  property bool discoveryFailed: false
+  property bool discoveryTerminationRequested: false
+  property bool discoveryRefreshPending: false
   property string preferredMountpoint: ""
   property int selectedFilesystemIndex: -1
 
@@ -44,6 +51,12 @@ Item {
   property bool scanProcessExited: false
   property var scanLineQueue: []
   property int scanLineQueueIndex: 0
+  property int scanQueuedLineCount: 0
+  property int scanQueuedBytes: 0
+  property bool scanAcceptingRecords: false
+  property bool scanTerminationRequested: false
+  property string scanTerminationRequestId: ""
+  property int scanStderrBytes: 0
   property var pendingScan: null
   property int progressEntries: 0
   property double progressBytes: 0
@@ -60,6 +73,17 @@ Item {
   property bool searchRunning: false
   property int searchResultLimit: 500
   property string actionFeedback: ""
+  property int copyStdoutBytes: 0
+  property int copyStderrBytes: 0
+  property bool copyTerminationRequested: false
+
+  readonly property int maxQueuedScanLines: 4096
+  readonly property int maxQueuedScanBytes: 16 * 1024 * 1024
+  readonly property int maxEventBytes: 64 * 1024
+  readonly property int maxStagedDirectories: 500000
+  readonly property int maxPathBytes: 4096
+  readonly property int maxDiscoveryStdoutBytes: 4 * 1024 * 1024
+  readonly property int maxDiagnosticBytes: 64 * 1024
 
   readonly property string pluginId: (manifest && manifest.id)
     ? String(manifest.id) : "io.github.camstraps.omatree"
@@ -69,6 +93,125 @@ Item {
     selectedFilesystemIndex >= 0 && selectedFilesystemIndex < filesystemModel.count
       ? filesystemModel.get(selectedFilesystemIndex) : null
   readonly property bool scanning: activeRequestId !== "" || scanProcess.running
+
+  function utf8Bytes(value) {
+    return FrontendSafety.utf8Bytes(value, maxEventBytes + 1)
+  }
+
+  function clearScanQueue() {
+    scanDrainTimer.stop()
+    scanLineQueue = []
+    scanLineQueueIndex = 0
+    scanQueuedLineCount = 0
+    scanQueuedBytes = 0
+  }
+
+  function requestScanTermination() {
+    if (scanTerminationRequested || !scanProcess.running) return
+    scanTerminationRequested = true
+    scanTerminationRequestId = activeRequestId
+    scanProcess.signal(15)
+    scanKillTimer.restart()
+  }
+
+  function failActiveScan(message) {
+    if (activeRequestId === "" || !scanAcceptingRecords) return
+    activeProtocolError = String(message || "Directory scan failed.")
+    activeComplete = null
+    scanAcceptingRecords = false
+    activeDirectoryCache = ({})
+    activePendingChildren = ({})
+    activeDirectoryCount = 0
+    clearScanQueue()
+    requestScanTermination()
+    if (!scanProcess.running) {
+      scanProcessExited = true
+      maybeSettleScan()
+    }
+  }
+
+  function resetDiscoveryOutput() {
+    discoveryStdout = ""
+    discoveryStderr = ""
+    discoveryStdoutBytes = 0
+    discoveryStderrBytes = 0
+    discoveryFailed = false
+  }
+
+  function requestDiscoveryTermination() {
+    if (discoveryTerminationRequested || !discoveryProcess.running) return
+    discoveryTerminationRequested = true
+    discoveryProcess.signal(15)
+    discoveryKillTimer.restart()
+  }
+
+  function failDiscovery(message) {
+    discoveryFailed = true
+    discoveryError = String(message || "Filesystem discovery failed.")
+    discoveryStdout = ""
+    requestDiscoveryTermination()
+  }
+
+  function appendDiscoveryOutput(raw, isError) {
+    if (discoveryFailed) return
+    var value = String(raw || "")
+    var bytes = utf8Bytes(value) + 1
+    var current = isError ? discoveryStderrBytes : discoveryStdoutBytes
+    var limit = isError ? maxDiagnosticBytes : maxDiscoveryStdoutBytes
+    if (FrontendSafety.outputLimitExceeded(bytes, current, limit)) {
+      failDiscovery("Filesystem discovery exceeded its output limit.")
+      return
+    }
+    if (isError) {
+      discoveryStderr += value + "\n"
+      discoveryStderrBytes += bytes
+    } else {
+      discoveryStdout += value + "\n"
+      discoveryStdoutBytes += bytes
+    }
+  }
+
+  function appendScanStderr(raw) {
+    if (activeRequestId === "" || !scanAcceptingRecords) return
+    var value = String(raw || "")
+    var bytes = utf8Bytes(value) + 1
+    if (FrontendSafety.outputLimitExceeded(
+          bytes, scanStderrBytes, maxDiagnosticBytes)) {
+      activeStderr = ""
+      scanStderrBytes = 0
+      failActiveScan("Directory scanner exceeded its diagnostic output limit.")
+      return
+    }
+    activeStderr += value + "\n"
+    scanStderrBytes += bytes
+  }
+
+  function boundCopyOutput(raw, isError) {
+    var bytes = utf8Bytes(raw) + 1
+    var current = isError ? copyStderrBytes : copyStdoutBytes
+    if (FrontendSafety.outputLimitExceeded(
+          bytes, current, maxDiagnosticBytes)) {
+      if (!copyTerminationRequested && copyProcess.running) {
+        copyTerminationRequested = true
+        copyProcess.signal(15)
+        copyKillTimer.restart()
+      }
+      return
+    }
+    if (isError) copyStderrBytes += bytes
+    else copyStdoutBytes += bytes
+  }
+
+  function launchDiscovery() {
+    discoveryRefreshPending = false
+    discoveryTerminationRequested = false
+    resetDiscoveryOutput()
+    discoveryLoading = true
+    discoveryError = ""
+    discoveryProcess.command = ["/usr/bin/python3", helperPath, "discover"]
+    discoveryProcess.running = true
+    discoveryDeadlineTimer.restart()
+  }
 
   function open(payloadJson) {
     opened = true
@@ -93,12 +236,10 @@ Item {
     pendingScan = null
     cancelActiveScan()
     clearTree()
-    if (discoveryProcess.running) discoveryProcess.running = false
-    discoveryLoading = true
-    discoveryError = ""
-    discoveryStderr = ""
-    discoveryProcess.command = ["python3", helperPath, "discover"]
-    discoveryProcess.running = true
+    if (discoveryProcess.running) {
+      discoveryRefreshPending = true
+      requestDiscoveryTermination()
+    } else launchDiscovery()
   }
 
   function clearTree() {
@@ -272,14 +413,17 @@ Item {
   function copySelectedPath() {
     if (!selectedTreePath || copyProcess.running) return
     copyProcess.pathToCopy = selectedTreePath
-    copyProcess.command = ["wl-copy"]
+    copyStdoutBytes = 0
+    copyStderrBytes = 0
+    copyTerminationRequested = false
+    copyProcess.command = ["/usr/bin/wl-copy"]
     copyProcess.stdinEnabled = true
     copyProcess.running = true
   }
 
   function openSelectedFolder() {
     if (!selectedTreePath) return
-    Quickshell.execDetached(["xdg-open", selectedTreePath])
+    Quickshell.execDetached(["/usr/bin/xdg-open", selectedTreePath])
     actionFeedback = "Opened folder"
     feedbackTimer.restart()
   }
@@ -337,8 +481,11 @@ Item {
     activeExpectedStop = false
     activeExitCode = 0
     scanProcessExited = false
-    scanLineQueue = []
-    scanLineQueueIndex = 0
+    clearScanQueue()
+    scanAcceptingRecords = true
+    scanTerminationRequested = false
+    scanTerminationRequestId = ""
+    scanStderrBytes = 0
     progressEntries = 0
     progressBytes = 0
     scanStartedAt = Date.now()
@@ -349,30 +496,36 @@ Item {
     node.requestId = activeRequestId
     rebuildTreeRows()
     scanProcess.command = [
-      "python3", helperPath, "scan",
+      "/usr/bin/python3", helperPath, "scan",
       "--mountpoint", request.mountpoint,
       "--path", request.path,
       "--request-id", activeRequestId
     ]
     scanProcess.running = true
+    scanDeadlineTimer.restart()
   }
 
   function cancelActiveScan() {
     if (activeRequestId === "" && !scanProcess.running) return
     activeExpectedStop = true
-    scanLineQueue = []
-    scanLineQueueIndex = 0
+    activeComplete = null
+    scanAcceptingRecords = false
+    clearScanQueue()
     var node = treeCache[activePath]
     if (node && node.requestId === activeRequestId) {
       node.loading = false
       node.requestId = ""
       rebuildTreeRows()
     }
-    if (scanProcess.running) scanProcess.running = false
-    else settleScan()
+    if (scanProcess.running) requestScanTermination()
+    else {
+      scanProcessExited = true
+      settleScan()
+    }
   }
 
   function handleScanLine(rawLine) {
+    if (!scanAcceptingRecords) return
     var line = String(rawLine || "").trim()
     if (line === "") return
     var message
@@ -390,6 +543,9 @@ Item {
       activeWarningCount++
       if (activeFirstWarning === "") activeFirstWarning = String(message.error || "Some paths could not be read.")
     } else if (message.type === "directory") {
+      var validationError = FrontendSafety.directoryLimitError(
+        message, activeDirectoryCount, maxStagedDirectories, maxPathBytes)
+      if (validationError !== "") { failActiveScan(validationError); return }
       var directoryError = TreeModel.stageDirectory(activeDirectoryCache, activePendingChildren, {
         name: String(message.name || message.path || "Directory"),
         path: String(message.path || ""),
@@ -399,7 +555,10 @@ Item {
         childDirectoryCount: Number(message.childDirectoryCount || 0),
         warningCount: Number(message.warningCount || 0)
       })
-      if (directoryError !== "") activeProtocolError = directoryError
+      if (directoryError !== "") {
+        failActiveScan(directoryError)
+        return
+      }
       else activeDirectoryCount++
     } else if (message.type === "complete") activeComplete = message
     else if (message.type === "cancelled") activeCancelled = true
@@ -407,23 +566,39 @@ Item {
   }
 
   function enqueueScanLine(line) {
-    scanLineQueue.push(String(line || ""))
+    if (!scanAcceptingRecords || activeRequestId === "") return
+    var value = String(line || "")
+    var bytes = utf8Bytes(value) + 1
+    var queueError = FrontendSafety.queueLimitError(
+      bytes, scanQueuedLineCount, scanQueuedBytes,
+      maxEventBytes, maxQueuedScanLines, maxQueuedScanBytes)
+    if (queueError !== "") { failActiveScan(queueError); return }
+    scanLineQueue.push({ text: value, bytes: bytes })
+    scanQueuedLineCount++
+    scanQueuedBytes += bytes
     if (!scanDrainTimer.running) scanDrainTimer.start()
   }
 
   function drainScanLines() {
-    var end = Math.min(scanLineQueue.length, scanLineQueueIndex + 100)
-    while (scanLineQueueIndex < end) handleScanLine(scanLineQueue[scanLineQueueIndex++])
-    if (scanLineQueueIndex >= scanLineQueue.length) {
+    var count = Math.min(scanLineQueue.length, 100)
+    var batch = scanLineQueue.splice(0, count)
+    for (var i = 0; i < batch.length; i++) {
+      scanQueuedLineCount--
+      scanQueuedBytes -= batch[i].bytes
+      handleScanLine(batch[i].text)
+      if (!scanAcceptingRecords) break
+    }
+    scanLineQueueIndex = 0
+    if (scanLineQueue.length === 0) {
       scanDrainTimer.stop()
-      scanLineQueue = []
-      scanLineQueueIndex = 0
+      scanQueuedLineCount = 0
+      scanQueuedBytes = 0
       maybeSettleScan()
     }
   }
 
   function maybeSettleScan() {
-    if (!scanProcessExited || scanLineQueue.length > 0 || scanDrainTimer.running) return
+    if (!scanProcessExited || scanQueuedLineCount > 0 || scanDrainTimer.running) return
     // A successful helper run always ends with a complete record. Waiting for
     // that terminal record also handles onExited arriving before SplitParser.
     if (activeExpectedStop || activeCancelled || activeComplete
@@ -476,8 +651,13 @@ Item {
     activePendingChildren = ({})
     activeDirectoryCount = 0
     activeComplete = null
-    scanLineQueue = []
-    scanLineQueueIndex = 0
+    scanAcceptingRecords = false
+    scanDeadlineTimer.stop()
+    scanKillTimer.stop()
+    scanTerminationRequested = false
+    scanTerminationRequestId = ""
+    scanStderrBytes = 0
+    clearScanQueue()
     progressEntries = 0
     progressBytes = 0
     var next = pendingScan
@@ -513,8 +693,12 @@ Item {
     id: copyProcess
     property string pathToCopy: ""
     stdinEnabled: true
+    stdout: SplitParser { onRead: function(line) { root.boundCopyOutput(line, false) } }
+    stderr: SplitParser { onRead: function(line) { root.boundCopyOutput(line, true) } }
     onStarted: { write(pathToCopy); stdinEnabled = false }
     onExited: function(code) {
+      copyKillTimer.stop()
+      copyTerminationRequested = false
       root.actionFeedback = code === 0 ? "Path copied" : "Could not copy path"
       feedbackTimer.restart()
       pathToCopy = ""
@@ -523,25 +707,35 @@ Item {
 
   Process {
     id: discoveryProcess
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.applyDiscovery(text) }
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.discoveryStderr = String(text || "").trim()
-        if (root.discoveryError !== "" && root.discoveryStderr !== "") root.discoveryError = root.discoveryStderr
-      }
-    }
+    stdout: SplitParser { onRead: function(line) { root.appendDiscoveryOutput(line, false) } }
+    stderr: SplitParser { onRead: function(line) { root.appendDiscoveryOutput(line, true) } }
     onExited: function(exitCode) {
+      discoveryDeadlineTimer.stop()
+      discoveryKillTimer.stop()
+      discoveryTerminationRequested = false
       root.discoveryLoading = false
-      if (exitCode !== 0) root.discoveryError = root.discoveryStderr || "Filesystem discovery failed."
+      if (!root.discoveryRefreshPending && !root.discoveryFailed && exitCode === 0)
+        root.applyDiscovery(root.discoveryStdout)
+      else if (!root.discoveryRefreshPending && !root.discoveryFailed)
+        root.discoveryError = root.discoveryStderr.trim() || "Filesystem discovery failed."
+      root.discoveryStdout = ""
+      root.discoveryStderr = ""
+      root.discoveryStdoutBytes = 0
+      root.discoveryStderrBytes = 0
+      if (root.discoveryRefreshPending)
+        Qt.callLater(function() { root.launchDiscovery() })
     }
   }
 
   Process {
     id: scanProcess
     stdout: SplitParser { onRead: function(line) { root.enqueueScanLine(line) } }
-    stderr: StdioCollector { waitForEnd: true; onStreamFinished: root.activeStderr = String(text || "").trim() }
+    stderr: SplitParser { onRead: function(line) { root.appendScanStderr(line) } }
     onExited: function(exitCode) {
+      scanDeadlineTimer.stop()
+      scanKillTimer.stop()
+      scanTerminationRequested = false
+      scanTerminationRequestId = ""
       root.activeExitCode = exitCode
       root.scanProcessExited = true
       root.maybeSettleScan()
@@ -551,6 +745,40 @@ Item {
   // Qt timers do not run with a zero interval in the installed Quickshell/Qt
   // combination. One millisecond retains batched UI updates without stalling.
   Timer { id: scanDrainTimer; interval: 1; repeat: true; onTriggered: root.drainScanLines() }
+  Timer {
+    id: scanDeadlineTimer
+    interval: 60 * 60 * 1000
+    onTriggered: root.failActiveScan("Directory scan timed out after 60 minutes.")
+  }
+  Timer {
+    id: scanKillTimer
+    interval: 2000
+    onTriggered: {
+      if (scanProcess.running && root.scanTerminationRequested
+          && root.scanTerminationRequestId === root.activeRequestId)
+        scanProcess.signal(9)
+    }
+  }
+  Timer {
+    id: discoveryDeadlineTimer
+    interval: 15000
+    onTriggered: root.failDiscovery("Filesystem discovery timed out after 15 seconds.")
+  }
+  Timer {
+    id: discoveryKillTimer
+    interval: 2000
+    onTriggered: {
+      if (discoveryProcess.running && root.discoveryTerminationRequested)
+        discoveryProcess.signal(9)
+    }
+  }
+  Timer {
+    id: copyKillTimer
+    interval: 2000
+    onTriggered: {
+      if (copyProcess.running && root.copyTerminationRequested) copyProcess.signal(9)
+    }
+  }
   Timer { interval: 250; repeat: true; running: root.scanning; onTriggered: root.scanElapsedSeconds = (Date.now() - root.scanStartedAt) / 1000 }
   Timer { id: searchDebounce; interval: 180; onTriggered: root.beginSearch() }
   Timer { id: searchTimer; interval: 1; repeat: true; onTriggered: root.searchBatch() }

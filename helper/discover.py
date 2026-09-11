@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Discover user-relevant mounted filesystems for OmaTree."""
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from typing import Any
 
 from omatree_core import protocol
 from omatree_core.discovery import (
+    DISCOVERY_STDOUT_LIMIT,
     build_discovery,
     discover,
     run_json,
@@ -33,6 +34,12 @@ from omatree_core.scanner import (
     scan_directory,
     scan_tree,
 )
+from omatree_core.resources import (
+    DEFAULT_LIMITS,
+    NdjsonBudget,
+    ResourceLimitExceeded,
+    ResourceLimits,
+)
 
 
 def emit_ndjson(message: dict[str, Any]) -> None:
@@ -40,19 +47,60 @@ def emit_ndjson(message: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
-def scan_command(args: argparse.Namespace) -> int:
+def emit_bounded_error(
+    request_id: str,
+    path: str,
+    error: object,
+    limits: ResourceLimits = DEFAULT_LIMITS,
+) -> None:
+    budget = NdjsonBudget(limits)
+    message = protocol.error_event(request_id, path, error)
+    try:
+        budget.account(protocol.encode_ndjson(message), terminal=True)
+    except ResourceLimitExceeded:
+        message = protocol.error_event(request_id, "", error)
+        budget.account(protocol.encode_ndjson(message), terminal=True)
+    emit_ndjson(message)
+
+
+def scan_command(
+    args: argparse.Namespace, limits: ResourceLimits = DEFAULT_LIMITS,
+) -> int:
     mountpoint = canonical_path(args.mountpoint)
     path = canonical_path(args.path)
     request_id = args.request_id
+    budget = NdjsonBudget(limits)
+
+    def emit_event(message: dict[str, Any], terminal: bool = False) -> None:
+        budget.account(protocol.encode_ndjson(message), terminal=terminal)
+        emit_ndjson(message)
+
+    def emit_resource_failure(error: ResourceLimitExceeded) -> None:
+        message = protocol.error_event(request_id, path, error)
+        try:
+            emit_event(message, terminal=True)
+        except ResourceLimitExceeded:
+            # An oversized caller-supplied path must not consume the reserved
+            # terminal-event budget or bypass the NDJSON ceiling.
+            emit_event(
+                protocol.error_event(request_id, "", error), terminal=True
+            )
 
     validation_error = validate_scan_root(path, mountpoint)
     if validation_error is not None:
-        emit_ndjson(protocol.error_event(request_id, path, validation_error))
+        try:
+            emit_event(
+                protocol.error_event(request_id, path, validation_error),
+                terminal=True,
+            )
+        except ResourceLimitExceeded as error:
+            emit_resource_failure(error)
+            return 3
         return 2
 
     findmnt_data = run_json(
         [
-            "findmnt",
+            "/usr/bin/findmnt",
             "--json",
             "--bytes",
             "--output",
@@ -61,52 +109,71 @@ def scan_command(args: argparse.Namespace) -> int:
     )
     exclusions = descendant_mountpoints(mountpoint, findmnt_data)
     if is_excluded(path, exclusions):
-        emit_ndjson(protocol.error_event(
-            request_id,
-            path,
-            "scan path belongs to a descendant mounted filesystem",
-        ))
+        try:
+            emit_event(
+                protocol.error_event(
+                    request_id,
+                    path,
+                    "scan path belongs to a descendant mounted filesystem",
+                ),
+                terminal=True,
+            )
+        except ResourceLimitExceeded as error:
+            emit_resource_failure(error)
+            return 3
         return 2
 
     cancellation = Cancellation()
     signal.signal(signal.SIGTERM, cancellation.cancel)
     signal.signal(signal.SIGINT, cancellation.cancel)
-    reporter = ScanReporter(request_id, emit_ndjson)
+    reporter = ScanReporter(request_id, emit_event, limits=limits)
     started = time.monotonic()
-    emit_ndjson(protocol.start_event(
-        request_id, path, mountpoint, sorted(exclusions)
-    ))
 
     try:
+        emit_event(protocol.start_event(
+            request_id, path, mountpoint, sorted(exclusions)
+        ))
         result = scan_tree(
             path,
             exclusions,
             reporter,
             cancellation,
-            lambda record: emit_ndjson(protocol.directory_event(request_id, record)),
+            lambda record: emit_event(protocol.directory_event(request_id, record)),
+            limits,
         )
         cancellation.check()
     except ScanCancelled:
-        emit_ndjson(protocol.cancelled_event(
+        try:
+            emit_event(protocol.cancelled_event(
+                request_id,
+                path,
+                reporter.entries,
+                reporter.bytes,
+                round((time.monotonic() - started) * 1000),
+            ), terminal=True)
+        except ResourceLimitExceeded as error:
+            emit_resource_failure(error)
+            return 3
+        return 130
+    except ResourceLimitExceeded as error:
+        emit_resource_failure(error)
+        return 3
+
+    try:
+        emit_event(protocol.complete_event(
             request_id,
             path,
+            result["bytes"],
+            result["directFilesBytes"],
             reporter.entries,
-            reporter.bytes,
+            result["directoryCount"],
+            reporter.warning_count,
+            max(0, reporter.warning_count - MAX_WARNINGS),
             round((time.monotonic() - started) * 1000),
-        ))
-        return 130
-
-    emit_ndjson(protocol.complete_event(
-        request_id,
-        path,
-        result["bytes"],
-        result["directFilesBytes"],
-        reporter.entries,
-        result["directoryCount"],
-        reporter.warning_count,
-        max(0, reporter.warning_count - MAX_WARNINGS),
-        round((time.monotonic() - started) * 1000),
-    ))
+        ), terminal=True)
+    except ResourceLimitExceeded as error:
+        emit_resource_failure(error)
+        return 3
     return 0
 
 
@@ -123,17 +190,31 @@ def main() -> int:
     if args.command == "scan":
         try:
             return scan_command(args)
-        except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
-            emit_ndjson(protocol.error_event(
+        except (
+            OSError,
+            subprocess.SubprocessError,
+            json.JSONDecodeError,
+            ResourceLimitExceeded,
+        ) as error:
+            emit_bounded_error(
                 args.request_id, canonical_path(args.path), error
-            ))
+            )
             return 1
 
     try:
-        json.dump(discover(), sys.stdout, separators=(",", ":"))
-        sys.stdout.write("\n")
+        encoded = json.dumps(discover(), separators=(",", ":")) + "\n"
+        if len(encoded.encode("utf-8")) > DISCOVERY_STDOUT_LIMIT:
+            raise ResourceLimitExceeded(
+                "discovery output bytes", DISCOVERY_STDOUT_LIMIT
+            )
+        sys.stdout.write(encoded)
         return 0
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+    except (
+        OSError,
+        subprocess.SubprocessError,
+        json.JSONDecodeError,
+        ResourceLimitExceeded,
+    ) as error:
         json.dump({"schemaVersion": 1, "error": str(error)}, sys.stderr)
         sys.stderr.write("\n")
         return 1

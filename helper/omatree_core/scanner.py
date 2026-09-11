@@ -9,6 +9,12 @@ from typing import Any, Callable
 
 from . import protocol
 from .paths import canonical_path, is_excluded
+from .resources import (
+    DEFAULT_LIMITS,
+    ResourceLimitExceeded,
+    ResourceLimits,
+    check_path,
+)
 
 
 MAX_WARNINGS = 100
@@ -37,17 +43,21 @@ class ScanReporter:
         emit: Callable[[dict[str, Any]], None],
         clock: Callable[[], float] = time.monotonic,
         progress_interval: float = 0.25,
+        limits: ResourceLimits = DEFAULT_LIMITS,
     ) -> None:
         self.request_id = request_id
         self.emit = emit
         self.clock = clock
         self.progress_interval = progress_interval
+        self.limits = limits
         self.entries = 0
         self.bytes = 0
         self.warning_count = 0
         self._last_progress = clock()
 
     def account(self, allocated_bytes: int) -> None:
+        if self.entries >= self.limits.max_entries:
+            raise ResourceLimitExceeded("scanned entries", self.limits.max_entries)
         self.entries += 1
         self.bytes += allocated_bytes
         now = self.clock()
@@ -73,11 +83,12 @@ def scan_directory(
     excluded_mounts: set[str],
     reporter: ScanReporter,
     cancellation: Cancellation,
+    limits: ResourceLimits = DEFAULT_LIMITS,
 ) -> dict[str, Any]:
     """Measure a complete directory tree and return its directory records."""
     directories: list[dict[str, Any]] = []
     summary = scan_tree(
-        path, excluded_mounts, reporter, cancellation, directories.append
+        path, excluded_mounts, reporter, cancellation, directories.append, limits
     )
     summary["directories"] = directories
     root = canonical_path(path)
@@ -103,12 +114,18 @@ def scan_tree(
     reporter: ScanReporter,
     cancellation: Cancellation,
     emit_directory: Callable[[dict[str, Any]], None],
+    limits: ResourceLimits = DEFAULT_LIMITS,
 ) -> dict[str, Any]:
     """Scan once and emit finalized directory aggregates in post-order."""
     root = canonical_path(path)
     exclusions = {canonical_path(item) for item in excluded_mounts}
     seen_hardlinks: set[tuple[int, int]] = set()
     directory_count = 0
+    discovered_directory_count = 1
+    reporter.limits = limits
+    check_path(root, limits)
+    if discovered_directory_count > limits.max_directories:
+        raise ResourceLimitExceeded("directories", limits.max_directories)
 
     def count_stat(stats: os.stat_result) -> int:
         if stat.S_ISREG(stats.st_mode) and stats.st_nlink > 1:
@@ -116,6 +133,10 @@ def scan_tree(
             if key in seen_hardlinks:
                 reporter.account(0)
                 return 0
+            if len(seen_hardlinks) >= limits.max_hardlink_identities:
+                raise ResourceLimitExceeded(
+                    "hardlink identities", limits.max_hardlink_identities
+                )
             seen_hardlinks.add(key)
         value = allocated_size(stats)
         reporter.account(value)
@@ -201,6 +222,7 @@ def scan_tree(
                 continue
 
             entry_path = entry.path
+            check_path(entry_path, limits)
             if is_excluded(entry_path, exclusions):
                 continue
             try:
@@ -210,6 +232,11 @@ def scan_tree(
                 continue
 
             if stat.S_ISDIR(stats.st_mode):
+                if discovered_directory_count >= limits.max_directories:
+                    raise ResourceLimitExceeded(
+                        "directories", limits.max_directories
+                    )
+                discovered_directory_count += 1
                 stack.append(open_frame(
                     entry_path,
                     entry.name,
