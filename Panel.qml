@@ -8,6 +8,8 @@ import qs.Commons
 import qs.Ui
 import "TreeModel.js" as TreeModel
 import "FrontendSafety.js" as FrontendSafety
+import "BrowserState.js" as BrowserState
+import "SearchState.js" as SearchState
 
 Item {
   id: root
@@ -27,36 +29,34 @@ Item {
   property string preferredMountpoint: ""
   property int selectedFilesystemIndex: -1
 
-  property var treeCache: ({})
   property string treeRootPath: ""
   property string selectedTreePath: ""
   property int selectedTreeIndex: -1
   property int treeGeneration: 0
   property int requestSerial: 0
-
-  property string activeRequestId: ""
-  property string activePath: ""
-  property int activeGeneration: -1
-  property var activeDirectoryCache: ({})
-  property var activePendingChildren: ({})
-  property int activeDirectoryCount: 0
-  property int activeWarningCount: 0
-  property string activeFirstWarning: ""
-  property string activeProtocolError: ""
-  property string activeStderr: ""
-  property var activeComplete: null
-  property bool activeCancelled: false
-  property bool activeExpectedStop: false
-  property int activeExitCode: 0
-  property bool scanProcessExited: false
-  property var scanLineQueue: []
-  property int scanLineQueueIndex: 0
-  property int scanQueuedLineCount: 0
-  property int scanQueuedBytes: 0
-  property bool scanAcceptingRecords: false
-  property bool scanTerminationRequested: false
-  property string scanTerminationRequestId: ""
-  property int scanStderrBytes: 0
+  property bool brokerReady: false
+  property bool brokerExpectedStop: false
+  property bool brokerTerminationRequested: false
+  property string brokerError: ""
+  property string brokerStderr: ""
+  property int brokerStderrBytes: 0
+  property var brokerLineQueue: []
+  property int brokerQueuedLineCount: 0
+  property int brokerQueuedBytes: 0
+  property var brokerRequests: ({})
+  property int brokerRequestCount: 0
+  property string scanRequestId: ""
+  property string stagingGenerationId: ""
+  property bool scanCancellationRequested: false
+  property var pendingActivation: null
+  property string activeGenerationId: ""
+  property bool activeBackendAvailable: false
+  property var activeRootMetadata: null
+  property var browserState: null
+  property var pendingNavigation: ({})
+  property string breadcrumbTarget: ""
+  property bool breadcrumbRequestRunning: false
+  property var activeScanWarnings: []
   property var pendingScan: null
   property int progressEntries: 0
   property double progressBytes: 0
@@ -66,68 +66,147 @@ Item {
   property double snapshotDurationMs: 0
   property string snapshotState: "idle"
   property string searchQuery: ""
-  property var searchKeys: []
-  property int searchIndex: 0
-  property var searchHeap: []
-  property int searchMatchCount: 0
   property bool searchRunning: false
-  property int searchResultLimit: 500
+  property var searchState: null
+  property int searchSerial: 0
+  property string searchRequestId: ""
+  property int searchRows: 0
+  property int searchPages: 0
+  property int searchOutstanding: 0
+  property int searchSessionsRetained: 0
+  property int searchRowsHighWater: 0
+  property int searchPagesHighWater: 0
+  property int searchOutstandingHighWater: 0
+  property int searchSessionsHighWater: 0
+  property var revealState: null
+  property string browserViewRootPath: ""
   property string actionFeedback: ""
   property int copyStdoutBytes: 0
   property int copyStderrBytes: 0
   property bool copyTerminationRequested: false
 
-  readonly property int maxQueuedScanLines: 4096
-  readonly property int maxQueuedScanBytes: 16 * 1024 * 1024
-  readonly property int maxEventBytes: 64 * 1024
-  readonly property int maxStagedDirectories: 500000
+  readonly property int brokerProtocolVersion: 1
+  readonly property int maxBrokerLineBytes: 1024 * 1024
+  readonly property int maxBrokerQueueLines: 256
+  readonly property int maxBrokerQueueBytes: 4 * 1024 * 1024
+  readonly property int maxBrokerRequests: 4
+  readonly property int maxBrokerRows: 64
+  readonly property int childPageRows: 64
+  readonly property int maxCachedDirectoryRows: 2048
+  readonly property int maxCachedPages: 24
+  readonly property int maxVisibleRows: 512
+  readonly property int maxExpansionStates: 256
+  readonly property int maxBreadcrumbRows: 128
+  readonly property int maxMetadataCacheRows: 256
+  readonly property int searchPageRows: 64
+  readonly property int maxSearchResultRows: 128
+  readonly property int maxSearchPages: 2
+  readonly property int maxSearchQueryBytes: 1024
   readonly property int maxPathBytes: 4096
+  readonly property int maxRequestIdBytes: 128
+  readonly property int maxGenerationIdBytes: 128
   readonly property int maxDiscoveryStdoutBytes: 4 * 1024 * 1024
   readonly property int maxDiagnosticBytes: 64 * 1024
+
+  // Test-visible logical high-water marks. These count only bounded broker
+  // transport/model state, never total scanned directories.
+  property int brokerQueueLinesHighWater: 0
+  property int brokerQueueBytesHighWater: 0
+  property int brokerRequestsHighWater: 0
+  property int activationRowsHighWater: 0
+  property int activeRowsHighWater: 0
+  property int generationIdsHighWater: 0
+  property int warningRowsHighWater: 0
+  property int cachedDirectoryRowsHighWater: 0
+  property int cachedPagesHighWater: 0
+  property int visibleRowsHighWater: 0
+  property int expansionStatesHighWater: 0
+  property int breadcrumbRowsHighWater: 0
+  property int metadataRowsHighWater: 0
+  property int cachedDirectoryRows: 0
+  property int cachedPages: 0
+  property int visibleRows: 0
+  property int expansionStates: 0
+  property int breadcrumbRows: 0
+  property int metadataRows: 0
 
   readonly property string pluginId: (manifest && manifest.id)
     ? String(manifest.id) : "io.github.camstraps.omatree"
   readonly property url helperUrl: Qt.resolvedUrl("helper/discover.py")
   readonly property string helperPath: decodeURIComponent(String(helperUrl).replace(/^file:\/\//, ""))
+  readonly property url brokerUrl: Qt.resolvedUrl("bin/omatree-broker")
+  readonly property string brokerPath: decodeURIComponent(String(brokerUrl).replace(/^file:\/\//, ""))
   readonly property var selectedFilesystem:
     selectedFilesystemIndex >= 0 && selectedFilesystemIndex < filesystemModel.count
       ? filesystemModel.get(selectedFilesystemIndex) : null
-  readonly property bool scanning: activeRequestId !== "" || scanProcess.running
+  readonly property bool scanning: scanRequestId !== ""
 
   function utf8Bytes(value) {
-    return FrontendSafety.utf8Bytes(value, maxEventBytes + 1)
+    return FrontendSafety.utf8Bytes(value, maxBrokerLineBytes + 1)
   }
 
-  function clearScanQueue() {
-    scanDrainTimer.stop()
-    scanLineQueue = []
-    scanLineQueueIndex = 0
-    scanQueuedLineCount = 0
-    scanQueuedBytes = 0
+  function clearBrokerQueue() {
+    brokerDrainTimer.stop()
+    brokerLineQueue = []
+    brokerQueuedLineCount = 0
+    brokerQueuedBytes = 0
   }
 
-  function requestScanTermination() {
-    if (scanTerminationRequested || !scanProcess.running) return
-    scanTerminationRequested = true
-    scanTerminationRequestId = activeRequestId
-    scanProcess.signal(15)
-    scanKillTimer.restart()
+  function clearBrokerRequests() {
+    brokerRequests = ({})
+    brokerRequestCount = 0
+    pendingNavigation = ({})
+    breadcrumbRequestRunning = false
+    brokerRequestDeadline.stop()
   }
 
-  function failActiveScan(message) {
-    if (activeRequestId === "" || !scanAcceptingRecords) return
-    activeProtocolError = String(message || "Directory scan failed.")
-    activeComplete = null
-    scanAcceptingRecords = false
-    activeDirectoryCache = ({})
-    activePendingChildren = ({})
-    activeDirectoryCount = 0
-    clearScanQueue()
-    requestScanTermination()
-    if (!scanProcess.running) {
-      scanProcessExited = true
-      maybeSettleScan()
-    }
+  function clearNavigationRequests() {
+    var identifiers = []
+    for (var requestId in pendingNavigation) identifiers.push(requestId)
+    pendingNavigation = ({})
+    breadcrumbTarget = ""
+    breadcrumbRequestRunning = false
+    for (var i = 0; i < identifiers.length; i++) finishBrokerRequest(identifiers[i])
+  }
+
+  function requestBrokerTermination() {
+    if (brokerTerminationRequested || !brokerProcess.running) return
+    brokerTerminationRequested = true
+    brokerProcess.signal(15)
+    brokerKillTimer.restart()
+  }
+
+  function failBroker(message) {
+    brokerError = String(message || "Snapshot backend failed.").slice(0, 1024)
+    brokerReady = false
+    pendingScan = null
+    pendingActivation = null
+    scanRequestId = ""
+    stagingGenerationId = ""
+    scanCancellationRequested = false
+    clearBrokerRequests()
+    clearBrokerQueue()
+    activeBackendAvailable = false
+    searchOutstanding = 0
+    searchRunning = false
+    if (searchState) searchState.error = "Snapshot backend is unavailable."
+    revealState = null
+    snapshotState = activeGenerationId !== "" ? "backend-unavailable" : "failed"
+    requestBrokerTermination()
+  }
+
+  function startBroker() {
+    if (brokerProcess.running || brokerReady) return
+    brokerExpectedStop = false
+    brokerTerminationRequested = false
+    brokerError = ""
+    brokerStderr = ""
+    brokerStderrBytes = 0
+    clearBrokerQueue()
+    clearBrokerRequests()
+    brokerProcess.command = [brokerPath]
+    brokerProcess.running = true
+    brokerHandshakeTimer.restart()
   }
 
   function resetDiscoveryOutput() {
@@ -171,19 +250,18 @@ Item {
     }
   }
 
-  function appendScanStderr(raw) {
-    if (activeRequestId === "" || !scanAcceptingRecords) return
+  function appendBrokerStderr(raw) {
     var value = String(raw || "")
     var bytes = utf8Bytes(value) + 1
     if (FrontendSafety.outputLimitExceeded(
-          bytes, scanStderrBytes, maxDiagnosticBytes)) {
-      activeStderr = ""
-      scanStderrBytes = 0
-      failActiveScan("Directory scanner exceeded its diagnostic output limit.")
+          bytes, brokerStderrBytes, maxDiagnosticBytes)) {
+      brokerStderr = ""
+      brokerStderrBytes = 0
+      failBroker("Snapshot backend exceeded its diagnostic output limit.")
       return
     }
-    activeStderr += value + "\n"
-    scanStderrBytes += bytes
+    brokerStderr += value + "\n"
+    brokerStderrBytes += bytes
   }
 
   function boundCopyOutput(raw, isError) {
@@ -215,7 +293,8 @@ Item {
 
   function open(payloadJson) {
     opened = true
-    refresh()
+    startBroker()
+    if (filesystemModel.count === 0) launchDiscovery()
     Qt.callLater(function() { if (opened) keyCatcher.forceActiveFocus() })
   }
 
@@ -223,6 +302,12 @@ Item {
     opened = false
     pendingScan = null
     cancelActiveScan()
+    if (brokerProcess.running) {
+      brokerExpectedStop = true
+      if (brokerReady)
+        sendBrokerRequest("shutdown", {}, 2000, "", "")
+      else requestBrokerTermination()
+    }
   }
 
   function dismiss() {
@@ -231,11 +316,12 @@ Item {
   }
 
   function refresh() {
-    preferredMountpoint = selectedFilesystem ? selectedFilesystem.mountpoint : preferredMountpoint
+    if (!brokerReady) startBroker()
+    preferredMountpoint = selectedFilesystem
+      ? selectedFilesystem.mountpoint : preferredMountpoint
     treeGeneration++
     pendingScan = null
     cancelActiveScan()
-    clearTree()
     if (discoveryProcess.running) {
       discoveryRefreshPending = true
       requestDiscoveryTermination()
@@ -243,15 +329,34 @@ Item {
   }
 
   function clearTree() {
-    treeCache = ({})
     treeRootPath = ""
     selectedTreePath = ""
     selectedTreeIndex = -1
     progressEntries = 0
     progressBytes = 0
+    brokerError = ""
     treeRows.clear()
     breadcrumbModel.clear()
-    cancelSearch()
+    activeRootMetadata = null
+    browserState = null
+    pendingNavigation = ({})
+    breadcrumbTarget = ""
+    breadcrumbRequestRunning = false
+    breadcrumbDebounce.stop()
+    cachedDirectoryRows = 0
+    cachedPages = 0
+    visibleRows = 0
+    expansionStates = 0
+    breadcrumbRows = 0
+    metadataRows = 0
+    searchQuery = ""
+    searchRunning = false
+    searchState = null
+    searchRows = 0
+    searchPages = 0
+    searchOutstanding = 0
+    searchSessionsRetained = 0
+    revealState = null
     snapshotDirectoryCount = 0
     snapshotDurationMs = 0
     snapshotState = "idle"
@@ -284,130 +389,173 @@ Item {
       return
     }
     var mountpoint = filesystemModel.get(index).mountpoint
-    if (selectedFilesystemIndex === index && treeRootPath === mountpoint) return
+    if (selectedFilesystemIndex === index && treeRootPath === mountpoint) {
+      requestScan(mountpoint)
+      return
+    }
     treeGeneration++
     pendingScan = null
     cancelActiveScan()
-    clearTree()
     selectedFilesystemIndex = index
     preferredMountpoint = mountpoint
-    var node = TreeModel.createNode(filesystemModel.get(index).displayName, mountpoint, 0, 0)
-    node.expanded = true
-    treeCache[mountpoint] = node
     treeRootPath = mountpoint
-    selectedTreePath = mountpoint
-    rebuildTreeRows()
     requestScan(mountpoint)
   }
 
-  function rebuildTreeRows() {
-    if (searchQuery.trim() !== "") return
-    var visible = TreeModel.visibleNodes(treeCache, treeRootPath)
-    treeRows.clear()
-    selectedTreeIndex = -1
-    for (var i = 0; i < visible.length; i++) {
-      var node = visible[i]
-      treeRows.append({
-        nodeName: node.name, nodePath: node.path, nodeBytes: node.bytes,
-        formattedSize: node.formattedSize, depth: node.depth,
-        expanded: node.expanded, loading: node.loading, loaded: node.loaded,
-        warningCount: node.warningCount, warningText: node.warningText,
-        errorText: node.error,
-        hasChildren: node.childDirectoryCount > 0,
-        percentParent: TreeModel.percentageOfParent(treeCache, node.path,
-          selectedFilesystem ? selectedFilesystem.totalBytes : node.bytes),
-        contextPath: node.path, searchResult: false
-      })
-      if (node.path === selectedTreePath) selectedTreeIndex = i
-    }
-    if (selectedTreeIndex < 0 && treeRows.count > 0) {
-      selectedTreeIndex = 0
-      selectedTreePath = treeRows.get(0).nodePath
-    }
-    rebuildBreadcrumb()
-  }
-
   function selectTreePath(path, reveal) {
-    if (!treeCache[path]) return
-    selectedTreePath = path
-    if (reveal) TreeModel.revealPath(treeCache, path)
-    rebuildTreeRows()
-    if (selectedTreeIndex >= 0) treeView.positionViewAtIndex(selectedTreeIndex, ListView.Contain)
-    rebuildBreadcrumb()
+    for (var i = 0; i < treeRows.count; i++) {
+      if (treeRows.get(i).nodePath === path) {
+        selectedTreePath = path
+        if (browserState) browserState.selection = path
+        selectedTreeIndex = i
+        treeView.positionViewAtIndex(i, ListView.Contain)
+        requestBreadcrumb(path)
+        return
+      }
+    }
+    if (activeRootMetadata && activeRootMetadata.path === path) {
+      selectedTreePath = path
+      browserState.selection = path
+      selectedTreeIndex = -1
+    }
+    requestBreadcrumb(path)
   }
 
   function rebuildBreadcrumb() {
     breadcrumbModel.clear()
-    var paths = TreeModel.ancestorPaths(treeCache, selectedTreePath)
-    for (var i = 0; i < paths.length; i++) {
-      var node = treeCache[paths[i]]
-      breadcrumbModel.append({ crumbName: node ? node.name : paths[i], crumbPath: paths[i] })
+    if (!browserState) return
+    for (var i = 0; i < browserState.breadcrumbs.length; i++) {
+      var crumb = browserState.breadcrumbs[i]
+      breadcrumbModel.append({ crumbName: crumb.name || "…", crumbPath: crumb.path || "" })
     }
-  }
-
-  function cancelSearch() {
-    searchTimer.stop()
-    searchDebounce.stop()
-    searchKeys = []
-    searchHeap = []
-    searchIndex = 0
-    searchMatchCount = 0
-    searchRunning = false
+    updateBrowserHighWater()
   }
 
   function scheduleSearch() {
-    cancelSearch()
-    if (searchQuery.trim() === "") { rebuildTreeRows(); return }
+    var query = searchQuery.trim()
+    if (FrontendSafety.utf8Bytes(query, maxSearchQueryBytes + 1) > maxSearchQueryBytes) {
+      clearSearchState(false)
+      showNavigationError("Search query exceeds 1024 bytes.")
+      return
+    }
+    if (query === "") { clearSearchState(true); return }
+    // Invalidate the previous session immediately; debounce only delays the
+    // replacement SQLite query, never stale-response rejection.
+    clearSearchState(false)
     treeRows.clear()
+    searchRunning = true
     searchDebounce.restart()
   }
 
-  function beginSearch() {
-    var query = searchQuery.trim().toLocaleLowerCase()
-    if (query === "") { rebuildTreeRows(); return }
-    searchKeys = Object.keys(treeCache)
-    searchIndex = 0
-    searchHeap = []
-    searchMatchCount = 0
-    searchRunning = true
-    searchTimer.start()
+  function chooseSearchResult(path) {
+    if (!searchState || !activeBackendAvailable) return
+    beginReveal(path)
   }
 
-  function searchBatch() {
-    var query = searchQuery.trim().toLocaleLowerCase()
-    if (query === "") { cancelSearch(); rebuildTreeRows(); return }
-    var end = Math.min(searchKeys.length, searchIndex + 1500)
-    while (searchIndex < end) {
-      var node = treeCache[searchKeys[searchIndex++]]
-      if (node && node.name.toLocaleLowerCase().indexOf(query) !== -1) {
-        searchMatchCount++
-        TreeModel.offerSearchMatch(searchHeap, node, searchResultLimit)
-      }
-    }
-    if (searchIndex < searchKeys.length) return
-    searchTimer.stop()
+  function clearSearchState(showBrowser) {
+    searchDebounce.stop()
+    searchSerial++
+    var staleRequests = []
+    for (var requestId in brokerRequests)
+      if (brokerRequests[requestId].operation === "search") staleRequests.push(requestId)
+    for (var index = 0; index < staleRequests.length; index++)
+      finishBrokerRequest(staleRequests[index])
+    searchRequestId = ""
+    revealState = null
     searchRunning = false
-    var results = TreeModel.sortedSearchHeap(searchHeap)
+    searchOutstanding = 0
+    if (searchState) SearchState.clear(searchState)
+    searchState = null
+    searchRows = 0
+    searchPages = 0
+    searchSessionsRetained = 0
+    if (showBrowser && browserState) rebuildVisibleWindow(selectedTreePath)
+  }
+
+  function beginSearch() {
+    var query = searchQuery.trim()
+    if (!query || !activeBackendAvailable) return
+    clearSearchState(false)
+    searchSerial++
+    var session = "search-" + String(searchSerial) + "-" + String(Date.now())
+    searchState = SearchState.create(activeGenerationId, session, query,
+      { pageRows: searchPageRows, maxRows: maxSearchResultRows, maxPages: maxSearchPages })
+    searchState.loading = true
+    searchRunning = true
+    searchSessionsRetained = 1
+    searchSessionsHighWater = Math.max(searchSessionsHighWater, 1)
+    treeRows.clear()
+    requestSearchPage("")
+  }
+
+  function requestSearchPage(continuation) {
+    if (!searchState || searchOutstanding >= 1 || !activeBackendAvailable) return
+    var requestId = sendBrokerRequest("search", {
+      generationId: activeGenerationId, query: searchState.query,
+      continuation: continuation || undefined
+    }, 10000, activeGenerationId, searchState.sessionId)
+    if (!requestId) return
+    searchRequestId = requestId
+    searchOutstanding = 1
+    searchOutstandingHighWater = Math.max(searchOutstandingHighWater, 1)
+    searchState.loading = true
+  }
+
+  function updateSearchMetrics() {
+    if (!searchState) { searchRows = 0; searchPages = 0; searchSessionsRetained = 0; return }
+    var stats = SearchState.stats(searchState)
+    searchRows = stats.rows
+    searchPages = stats.pages
+    searchSessionsRetained = stats.sessions
+    searchRowsHighWater = Math.max(searchRowsHighWater, searchRows)
+    searchPagesHighWater = Math.max(searchPagesHighWater, searchPages)
+    searchSessionsHighWater = Math.max(searchSessionsHighWater, searchSessionsRetained)
+  }
+
+  function renderSearchPage(preferredPath) {
     treeRows.clear()
     selectedTreeIndex = -1
-    for (var i = 0; i < results.length; i++) {
-      var item = results[i]
-      treeRows.append({ nodeName: item.name, nodePath: item.path, nodeBytes: item.bytes,
-        formattedSize: item.formattedSize, depth: 0, expanded: item.expanded,
-        loading: false, loaded: true, warningCount: item.warningCount,
-        warningText: item.warningText, errorText: item.error,
-        hasChildren: item.childDirectoryCount > 0,
-        percentParent: TreeModel.percentageOfParent(treeCache, item.path,
-          selectedFilesystem ? selectedFilesystem.totalBytes : item.bytes),
-        contextPath: item.path, searchResult: true })
+    var page = SearchState.currentPage(searchState)
+    if (!page) return
+    for (var i = 0; i < page.rows.length; i++) {
+      var row = page.rows[i]
+      treeRows.append({ nodeName: row.name, nodePath: row.path,
+        nodeBytes: row.allocated_bytes, formattedSize: TreeModel.formatBytes(row.allocated_bytes),
+        depth: 0, expanded: false, loading: false, loaded: true,
+        warningCount: row.warning_count,
+        warningText: row.warning_count > 0 ? String(row.warning_count) + " paths could not be read" : "",
+        errorText: "", hasChildren: row.child_count > 0, percentParent: 0,
+        contextPath: row.path, searchResult: true })
+      if (row.path === preferredPath) selectedTreeIndex = i
     }
+    if (selectedTreeIndex < 0 && treeRows.count > 0) selectedTreeIndex = 0
+    selectedTreePath = selectedTreeIndex >= 0 ? treeRows.get(selectedTreeIndex).nodePath : ""
+    updateSearchMetrics()
   }
 
-  function chooseSearchResult(path) {
-    searchField.text = ""
-    searchQuery = ""
-    cancelSearch()
-    selectTreePath(path, true)
+  function nextSearchPage() {
+    if (!searchState || searchOutstanding) return
+    if (SearchState.nextCached(searchState)) { renderSearchPage(""); return }
+    var page = SearchState.currentPage(searchState)
+    if (page && page.hasMore && page.continuation) requestSearchPage(page.continuation)
+  }
+
+  function previousSearchPage() {
+    if (SearchState.previous(searchState)) renderSearchPage("")
+    else showNavigationError("Earlier search results are no longer retained.")
+  }
+
+  function beginReveal(path) {
+    if (!searchState || !path) return
+    revealState = { generationId: activeGenerationId, path: path,
+      sessionId: searchState.sessionId, ancestors: null, page: null }
+    var requestId = sendBrokerRequest("ancestors", {
+      generationId: activeGenerationId, path: path
+    }, 3000, activeGenerationId, "reveal:" + searchState.sessionId)
+    if (requestId) pendingNavigation[requestId] = {
+      kind: "revealAncestors", path: path, rows: [], continuation: "",
+      sessionId: searchState.sessionId
+    }
   }
 
   function copySelectedPath() {
@@ -429,240 +577,720 @@ Item {
   }
 
   function toggleNode(path) {
-    var node = treeCache[path]
-    if (!node) return
-    selectedTreePath = path
-    if (node.expanded) {
-      node.expanded = false
-      rebuildTreeRows()
-    } else {
-      node.expanded = true
-      rebuildTreeRows()
+    selectTreePath(path, false)
+    if (!browserState || !activeBackendAvailable) return
+    if (browserState.expansions[path]) {
+      BrowserState.collapse(browserState, path)
+      rebuildVisibleWindow(path)
+      return
     }
-    rebuildBreadcrumb()
+    var key = BrowserState.pageKey(path, "")
+    if (browserState.pages[key]) {
+      if (!BrowserState.expand(browserState, path, key, currentAncestorPaths()))
+        showNavigationError("Expansion-state limit is fully pinned.")
+      rebuildVisibleWindow(path)
+      return
+    }
+    requestChildrenPage(path, "", "", true)
+  }
+
+  function browserLimits() {
+    return { pageRows: childPageRows, maxRows: maxCachedDirectoryRows,
+      maxPages: maxCachedPages, maxVisible: maxVisibleRows,
+      maxExpansions: maxExpansionStates, maxBreadcrumbs: maxBreadcrumbRows,
+      maxMetadata: maxMetadataCacheRows }
+  }
+
+  function currentAncestorPaths() {
+    var result = []
+    if (!browserState) return result
+    for (var i = 0; i < browserState.breadcrumbs.length; i++)
+      if (browserState.breadcrumbs[i].path) result.push(browserState.breadcrumbs[i].path)
+    return result
+  }
+
+  function updateBrowserHighWater() {
+    if (!browserState) return
+    var stats = BrowserState.stats(browserState)
+    cachedDirectoryRows = stats.rows
+    cachedPages = stats.pages
+    visibleRows = stats.visible
+    expansionStates = stats.expansions
+    breadcrumbRows = stats.breadcrumbs
+    metadataRows = stats.metadata
+    cachedDirectoryRowsHighWater = Math.max(cachedDirectoryRowsHighWater, stats.rows)
+    cachedPagesHighWater = Math.max(cachedPagesHighWater, stats.pages)
+    visibleRowsHighWater = Math.max(visibleRowsHighWater, stats.visible)
+    expansionStatesHighWater = Math.max(expansionStatesHighWater, stats.expansions)
+    breadcrumbRowsHighWater = Math.max(breadcrumbRowsHighWater, stats.breadcrumbs)
+    metadataRowsHighWater = Math.max(metadataRowsHighWater, stats.metadata)
+  }
+
+  function showNavigationError(message) {
+    actionFeedback = String(message || "Navigation request could not be completed.").slice(0, 1024)
+    feedbackTimer.restart()
+  }
+
+  function rowForPath(path) {
+    return browserState ? browserState.rows[path] : null
+  }
+
+  function appendVisibleRow(row, depth) {
+    var parent = row.parent_path ? rowForPath(row.parent_path) : null
+    var parentBytes = parent ? parent.allocated_bytes : row.allocated_bytes
+    treeRows.append({
+      nodeName: row.name, nodePath: row.path, nodeBytes: row.allocated_bytes,
+      formattedSize: TreeModel.formatBytes(row.allocated_bytes), depth: depth,
+      expanded: !!browserState.expansions[row.path], loading: false, loaded: true,
+      warningCount: row.warning_count,
+      warningText: row.warning_count > 0 ? String(row.warning_count) + " paths could not be read" : "",
+      errorText: "", hasChildren: row.child_count > 0,
+      percentParent: parentBytes > 0
+        ? TreeModel.clampPercent(row.allocated_bytes * 100 / parentBytes) : 0,
+      contextPath: row.path, searchResult: false
+    })
+  }
+
+  function rebuildVisibleWindow(preferredPath) {
+    if (!browserState || !activeRootMetadata) return
+    var visible = BrowserState.visible(browserState,
+      browserViewRootPath || activeRootMetadata.path)
+    treeRows.clear()
+    selectedTreeIndex = -1
+    for (var i = 0; i < visible.length; i++) {
+      var item = visible[i], row = rowForPath(item.path)
+      if (!row) continue
+      appendVisibleRow(row, item.depth)
+      if (row.path === preferredPath) selectedTreeIndex = treeRows.count - 1
+    }
+    if (selectedTreeIndex < 0 && treeRows.count > 0) selectedTreeIndex = 0
+    if (selectedTreeIndex >= 0) selectedTreePath = treeRows.get(selectedTreeIndex).nodePath
+    activeRowsHighWater = Math.max(activeRowsHighWater, treeRows.count)
+    updateBrowserHighWater()
+  }
+
+  function requestChildrenPage(parentPath, continuation, previousPageKey, expandAfter) {
+    if (!browserState || !activeBackendAvailable) return
+    var requestId = sendBrokerRequest("children", {
+      generationId: activeGenerationId, path: parentPath,
+      continuation: continuation || undefined
+    }, 3000, activeGenerationId, "")
+    if (requestId !== "") pendingNavigation[requestId] = {
+      kind: "children", parent: parentPath, continuation: continuation || "",
+      previousPageKey: previousPageKey || "", expandAfter: !!expandAfter
+    }
+  }
+
+  function nextChildPage(path) {
+    if (!browserState || !browserState.expansions[path]) return
+    var expansion = browserState.expansions[path]
+    var page = browserState.pages[expansion.pageKey]
+    if (!page || !page.hasMore || !page.nextContinuation) return
+    var key = BrowserState.pageKey(path, page.nextContinuation)
+    if (browserState.pages[key]) {
+      BrowserState.setPage(browserState, path, key)
+      rebuildVisibleWindow(path)
+    } else requestChildrenPage(path, page.nextContinuation, page.key, false)
+  }
+
+  function previousChildPage(path) {
+    if (!browserState || !browserState.expansions[path]) return
+    var key = BrowserState.previousPage(browserState, path)
+    if (!key) { showNavigationError("Earlier page is no longer cached; collapse and reopen to return to the first page."); return }
+    BrowserState.setPage(browserState, path, key)
+    rebuildVisibleWindow(path)
+  }
+
+  function requestBreadcrumb(path) {
+    if (!browserState || !activeBackendAvailable || !path) return
+    breadcrumbTarget = path
+    breadcrumbDebounce.restart()
+  }
+
+  function launchBreadcrumbQuery() {
+    if (breadcrumbRequestRunning || !breadcrumbTarget || !browserState
+        || !activeBackendAvailable) return
+    var path = breadcrumbTarget
+    breadcrumbRequestRunning = true
+    var requestId = sendBrokerRequest("ancestors", {
+      generationId: activeGenerationId, path: path
+    }, 3000, activeGenerationId, "")
+    if (requestId !== "") pendingNavigation[requestId] = {
+      kind: "ancestors", path: path, rows: [], continuation: ""
+    }
+    else breadcrumbRequestRunning = false
   }
 
   function retryNode(path) {
-    var node = treeCache[path]
-    if (!node) return
-    node.error = ""
-    node.warningText = ""
     requestScan(treeRootPath)
   }
 
   function requestScan(path) {
     var filesystem = selectedFilesystem
-    var node = treeCache[path]
-    if (!filesystem || !node || path !== treeRootPath) return
+    if (!filesystem || path !== treeRootPath) return
     var request = { path: path, mountpoint: filesystem.mountpoint, generation: treeGeneration }
-    if (scanProcess.running || activeRequestId !== "") {
+    if (!brokerReady) {
+      pendingScan = request
+      startBroker()
+    } else if (scanRequestId !== "") {
       pendingScan = request
       cancelActiveScan()
     } else launchScan(request)
   }
 
   function launchScan(request) {
-    if (!request || request.generation !== treeGeneration) return
-    var node = treeCache[request.path]
-    if (!node) return
-    requestSerial++
-    activeRequestId = String(treeGeneration) + "-" + String(Date.now()) + "-" + String(requestSerial)
-    activePath = request.path
-    activeGeneration = request.generation
-    activeDirectoryCache = ({})
-    activePendingChildren = ({})
-    activeDirectoryCount = 0
-    activeWarningCount = 0
-    activeFirstWarning = ""
-    activeProtocolError = ""
-    activeStderr = ""
-    activeComplete = null
-    activeCancelled = false
-    activeExpectedStop = false
-    activeExitCode = 0
-    scanProcessExited = false
-    clearScanQueue()
-    scanAcceptingRecords = true
-    scanTerminationRequested = false
-    scanTerminationRequestId = ""
-    scanStderrBytes = 0
+    if (!request || request.generation !== treeGeneration || !brokerReady) return
+    brokerError = ""
     progressEntries = 0
     progressBytes = 0
+    activeScanWarnings = []
     scanStartedAt = Date.now()
     scanElapsedSeconds = 0
     snapshotState = "scanning"
-    node.loading = true
-    node.error = ""
-    node.requestId = activeRequestId
-    rebuildTreeRows()
-    scanProcess.command = [
-      "/usr/bin/python3", helperPath, "scan",
-      "--mountpoint", request.mountpoint,
-      "--path", request.path,
-      "--request-id", activeRequestId
-    ]
-    scanProcess.running = true
-    scanDeadlineTimer.restart()
+    scanCancellationRequested = false
+    scanRequestId = sendBrokerRequest("scanStart", {
+      path: request.path, mountpoint: request.mountpoint
+    }, 60 * 60 * 1000 + 10000, "", "")
   }
 
   function cancelActiveScan() {
-    if (activeRequestId === "" && !scanProcess.running) return
-    activeExpectedStop = true
-    activeComplete = null
-    scanAcceptingRecords = false
-    clearScanQueue()
-    var node = treeCache[activePath]
-    if (node && node.requestId === activeRequestId) {
-      node.loading = false
-      node.requestId = ""
-      rebuildTreeRows()
+    if (scanRequestId === "" || stagingGenerationId === "" || scanCancellationRequested) return
+    scanCancellationRequested = true
+    sendBrokerRequest("scanCancel", {
+      generationId: stagingGenerationId
+    }, 3000, stagingGenerationId, "")
+  }
+
+  function nextBrokerRequestId() {
+    requestSerial++
+    return "qml-" + String(Date.now()) + "-" + String(requestSerial)
+  }
+
+  function sendBrokerRequest(operation, values, timeoutMs, generationId, activationToken) {
+    if (!brokerProcess.running || (operation !== "hello" && !brokerReady)) return ""
+    if (brokerRequestCount >= maxBrokerRequests) {
+      showNavigationError("Too many snapshot requests are still pending.")
+      return ""
     }
-    if (scanProcess.running) requestScanTermination()
-    else {
-      scanProcessExited = true
-      settleScan()
+    var requestId = nextBrokerRequestId()
+    var payload = { protocolVersion: brokerProtocolVersion,
+      requestId: requestId, operation: operation }
+    var source = values || {}
+    for (var key in source) payload[key] = source[key]
+    brokerRequests[requestId] = {
+      operation: operation, generationId: generationId || "",
+      activationToken: activationToken || "",
+      deadline: Date.now() + Number(timeoutMs || 3000)
+    }
+    brokerRequestCount++
+    brokerRequestsHighWater = Math.max(brokerRequestsHighWater, brokerRequestCount)
+    updateGenerationHighWater()
+    brokerRequestDeadline.start()
+    brokerProcess.write(JSON.stringify(payload) + "\n")
+    return requestId
+  }
+
+  function updateGenerationHighWater() {
+    var identities = ({})
+    if (activeGenerationId !== "") identities[activeGenerationId] = true
+    if (stagingGenerationId !== "") identities[stagingGenerationId] = true
+    if (pendingActivation) identities[pendingActivation.generationId] = true
+    for (var requestId in brokerRequests) {
+      var generation = brokerRequests[requestId].generationId
+      if (generation !== "") identities[generation] = true
+    }
+    generationIdsHighWater = Math.max(generationIdsHighWater,
+      Object.keys(identities).length)
+  }
+
+  function finishBrokerRequest(requestId) {
+    if (!brokerRequests[requestId]) return
+    delete brokerRequests[requestId]
+    brokerRequestCount--
+    if (brokerRequestCount <= 0) {
+      brokerRequestCount = 0
+      brokerRequestDeadline.stop()
     }
   }
 
-  function handleScanLine(rawLine) {
-    if (!scanAcceptingRecords) return
-    var line = String(rawLine || "").trim()
-    if (line === "") return
+  function enqueueBrokerLine(line) {
+    var value = String(line || "")
+    var bytes = FrontendSafety.utf8Bytes(value, maxBrokerLineBytes + 1) + 1
+    var error = FrontendSafety.brokerQueueLimitError(
+      bytes, brokerQueuedLineCount, brokerQueuedBytes,
+      maxBrokerLineBytes, maxBrokerQueueLines, maxBrokerQueueBytes)
+    if (error !== "") { failBroker(error); return }
+    brokerLineQueue.push({ text: value, bytes: bytes })
+    brokerQueuedLineCount++
+    brokerQueuedBytes += bytes
+    brokerQueueLinesHighWater = Math.max(brokerQueueLinesHighWater, brokerQueuedLineCount)
+    brokerQueueBytesHighWater = Math.max(brokerQueueBytesHighWater, brokerQueuedBytes)
+    if (!brokerDrainTimer.running) brokerDrainTimer.start()
+  }
+
+  function drainBrokerLines() {
+    var count = Math.min(brokerLineQueue.length, 32)
+    var batch = brokerLineQueue.splice(0, count)
+    for (var i = 0; i < batch.length; i++) {
+      brokerQueuedLineCount--
+      brokerQueuedBytes -= batch[i].bytes
+      handleBrokerLine(batch[i].text)
+      if (brokerTerminationRequested) break
+    }
+    if (brokerLineQueue.length === 0) {
+      brokerDrainTimer.stop()
+      brokerQueuedLineCount = 0
+      brokerQueuedBytes = 0
+    }
+  }
+
+  function validIdentifier(value, maximum) {
+    return typeof value === "string" && value !== ""
+      && FrontendSafety.utf8Bytes(value, maximum + 1) <= maximum
+      && /^[A-Za-z0-9._:-]+$/.test(value)
+  }
+
+  function validNumber(value) {
+    return typeof value === "number" && isFinite(value)
+      && value >= 0 && Math.floor(value) === value
+  }
+
+  function validateDirectoryRow(row) {
+    return FrontendSafety.brokerDirectoryRowError(row, maxPathBytes) === ""
+  }
+
+  function validateQueryResult(message, expectedOperation) {
+    if (!message.result || message.result.kind !== expectedOperation
+        || !Array.isArray(message.result.rows)
+        || message.result.rows.length > maxBrokerRows
+        || typeof message.result.hasMore !== "boolean") return null
+    var rows = []
+    for (var i = 0; i < message.result.rows.length; i++) {
+      var row = message.result.rows[i]
+      if (!validateDirectoryRow(row)) return null
+      rows.push(row)
+    }
+    return rows
+  }
+
+  function validContinuation(result) {
+    return (!result.hasMore && result.continuation === null)
+      || (result.hasMore && typeof result.continuation === "string"
+          && FrontendSafety.utf8Bytes(result.continuation, 32769) <= 32768)
+  }
+
+  function handleBrokerLine(rawLine) {
     var message
-    try { message = JSON.parse(line) }
-    catch (error) {
-      if (activeRequestId !== "") activeProtocolError = "Scanner returned malformed data; this result was not cached."
+    try { message = JSON.parse(String(rawLine || "")) }
+    catch (error) { failBroker("Snapshot backend returned malformed JSON."); return }
+    var envelopeError = FrontendSafety.brokerEnvelopeError(
+      message, brokerProtocolVersion, maxRequestIdBytes, maxGenerationIdBytes)
+    if (envelopeError !== "") {
+      failBroker(envelopeError)
       return
     }
-    if (!message || String(message.requestId || "") !== activeRequestId) return
-    if (activeGeneration !== treeGeneration) return
-    if (message.type === "progress") {
-      progressEntries = Number(message.entries || 0)
-      progressBytes = Number(message.bytes || 0)
-    } else if (message.type === "warning") {
-      activeWarningCount++
-      if (activeFirstWarning === "") activeFirstWarning = String(message.error || "Some paths could not be read.")
-    } else if (message.type === "directory") {
-      var validationError = FrontendSafety.directoryLimitError(
-        message, activeDirectoryCount, maxStagedDirectories, maxPathBytes)
-      if (validationError !== "") { failActiveScan(validationError); return }
-      var directoryError = TreeModel.stageDirectory(activeDirectoryCache, activePendingChildren, {
-        name: String(message.name || message.path || "Directory"),
-        path: String(message.path || ""),
-        parentPath: message.parentPath === null ? null : String(message.parentPath || ""),
-        bytes: Number(message.bytes || 0),
-        directFilesBytes: Number(message.directFilesBytes || 0),
-        childDirectoryCount: Number(message.childDirectoryCount || 0),
-        warningCount: Number(message.warningCount || 0)
-      })
-      if (directoryError !== "") {
-        failActiveScan(directoryError)
+    if (message.type === "ready" && message.requestId === "startup") return
+    if (!validIdentifier(message.requestId, maxRequestIdBytes)) {
+      failBroker("Snapshot backend returned an invalid request identity.")
+      return
+    }
+    var expected = brokerRequests[message.requestId]
+    if (!expected) return
+
+    if (message.type === "ready" && expected.operation === "hello") {
+      finishBrokerRequest(message.requestId)
+      brokerHandshakeTimer.stop()
+      brokerReady = true
+      var waiting = pendingScan
+      pendingScan = null
+      if (waiting) Qt.callLater(function() { launchScan(waiting) })
+      return
+    }
+    if (message.type === "scanStarted" && expected.operation === "scanStart") {
+      if (!validIdentifier(message.generationId, maxGenerationIdBytes)) {
+        failBroker("Snapshot backend returned an invalid generation identity.")
         return
       }
-      else activeDirectoryCount++
-    } else if (message.type === "complete") activeComplete = message
-    else if (message.type === "cancelled") activeCancelled = true
-    else if (message.type === "error") activeProtocolError = String(message.error || "Directory scan failed.")
-  }
-
-  function enqueueScanLine(line) {
-    if (!scanAcceptingRecords || activeRequestId === "") return
-    var value = String(line || "")
-    var bytes = utf8Bytes(value) + 1
-    var queueError = FrontendSafety.queueLimitError(
-      bytes, scanQueuedLineCount, scanQueuedBytes,
-      maxEventBytes, maxQueuedScanLines, maxQueuedScanBytes)
-    if (queueError !== "") { failActiveScan(queueError); return }
-    scanLineQueue.push({ text: value, bytes: bytes })
-    scanQueuedLineCount++
-    scanQueuedBytes += bytes
-    if (!scanDrainTimer.running) scanDrainTimer.start()
-  }
-
-  function drainScanLines() {
-    var count = Math.min(scanLineQueue.length, 100)
-    var batch = scanLineQueue.splice(0, count)
-    for (var i = 0; i < batch.length; i++) {
-      scanQueuedLineCount--
-      scanQueuedBytes -= batch[i].bytes
-      handleScanLine(batch[i].text)
-      if (!scanAcceptingRecords) break
+      expected.generationId = message.generationId
+      stagingGenerationId = message.generationId
+      updateGenerationHighWater()
+      if (pendingScan) Qt.callLater(function() { cancelActiveScan() })
+      return
     }
-    scanLineQueueIndex = 0
-    if (scanLineQueue.length === 0) {
-      scanDrainTimer.stop()
-      scanQueuedLineCount = 0
-      scanQueuedBytes = 0
-      maybeSettleScan()
-    }
-  }
-
-  function maybeSettleScan() {
-    if (!scanProcessExited || scanQueuedLineCount > 0 || scanDrainTimer.running) return
-    // A successful helper run always ends with a complete record. Waiting for
-    // that terminal record also handles onExited arriving before SplitParser.
-    if (activeExpectedStop || activeCancelled || activeComplete
-        || activeProtocolError !== "" || activeExitCode !== 0) settleScan()
-  }
-
-  function settleScan() {
-    if (activeRequestId === "") return
-    var requestId = activeRequestId
-    var path = activePath
-    var generation = activeGeneration
-    var node = treeCache[path]
-    var validTarget = generation === treeGeneration && node && node.requestId === requestId
-    if (validTarget) {
-      node.loading = false
-      node.requestId = ""
-      if (!activeExpectedStop && !activeCancelled && activeComplete
-          && activeProtocolError === "" && activeExitCode === 0) {
-        var expectedCount = Number(activeComplete.directoryCount || 0)
-        var built = expectedCount === activeDirectoryCount
-          ? TreeModel.finalizeTree(
-              activeDirectoryCache, activePendingChildren,
-              activeDirectoryCount, path, node.name)
-          : { error: "Scanner returned an incomplete directory tree." }
-        if (built.error !== "") {
-          node.error = built.error
-        } else {
-          treeCache = built.cache
-          var completedRoot = treeCache[path]
-          completedRoot.expanded = true
-          completedRoot.requestId = ""
-          completedRoot.warningCount = Number(activeComplete.warningCount || activeWarningCount)
-          completedRoot.warningText = completedRoot.warningCount > 0
-            ? String(completedRoot.warningCount) + " path" + (completedRoot.warningCount === 1 ? "" : "s") + " could not be read"
-            : ""
-          snapshotDirectoryCount = activeDirectoryCount
-          snapshotDurationMs = Number(activeComplete.durationMs || 0)
-          snapshotState = "complete"
+    if (expected.operation === "scanStart") {
+      if (message.generationId !== expected.generationId
+          || message.requestId !== scanRequestId) return
+      if (message.type === "scanProgress") {
+        if (!validNumber(message.entries) || !validNumber(message.bytes)) {
+          failBroker("Snapshot backend returned invalid progress data.")
+          return
         }
-      } else if (!activeExpectedStop && !activeCancelled) {
-        node.error = activeProtocolError || activeStderr || "Directory scan failed."
-        snapshotState = "failed"
+        progressEntries = message.entries
+        progressBytes = message.bytes
+        return
       }
-      rebuildTreeRows()
+      if (message.type === "scanWarning") {
+        if (activeScanWarnings.length < 100) {
+          activeScanWarnings.push(String(message.error || "Scan warning").slice(0, 1024))
+          warningRowsHighWater = Math.max(warningRowsHighWater, activeScanWarnings.length)
+        }
+        return
+      }
+      if (message.type === "scanFailed" || message.type === "scanCancelled") {
+        finishBrokerRequest(message.requestId)
+        scanRequestId = ""
+        stagingGenerationId = ""
+        scanCancellationRequested = false
+        snapshotState = activeGenerationId !== ""
+          ? (activeBackendAvailable ? "complete" : "backend-unavailable") : "failed"
+        if (message.type === "scanFailed") brokerError = String(message.error || "Scan failed.").slice(0, 1024)
+        launchPendingScan()
+        return
+      }
+      if (message.type === "snapshotActivated") {
+        if (!validNumber(message.bytes) || !validNumber(message.directFilesBytes)
+            || !validNumber(message.entries) || !validNumber(message.directoryCount)
+            || !validNumber(message.warningCount) || !validNumber(message.durationMs)
+            || typeof message.path !== "string"
+            || FrontendSafety.utf8Bytes(message.path, maxPathBytes + 1) > maxPathBytes) {
+          failBroker("Snapshot activation metadata is invalid.")
+          return
+        }
+        if (scanCancellationRequested) {
+          finishBrokerRequest(message.requestId)
+          scanRequestId = ""
+          stagingGenerationId = ""
+          scanCancellationRequested = false
+          sendBrokerRequest("activationAbort", {
+            generationId: message.generationId
+          }, 3000, message.generationId, "cancelled-activation")
+          snapshotState = activeGenerationId !== ""
+            ? (activeBackendAvailable ? "complete" : "backend-unavailable") : "failed"
+          launchPendingScan()
+          return
+        }
+        finishBrokerRequest(message.requestId)
+        scanRequestId = ""
+        stagingGenerationId = ""
+        var token = nextBrokerRequestId()
+        pendingActivation = { token: token, generationId: message.generationId,
+          path: message.path, summary: message, metadata: null, children: null }
+        updateGenerationHighWater()
+        sendBrokerRequest("metadata", { generationId: message.generationId,
+          path: message.path }, 3000, message.generationId, token)
+        sendBrokerRequest("children", { generationId: message.generationId,
+          path: message.path }, 3000, message.generationId, token)
+        return
+      }
     }
-    activeRequestId = ""
-    activePath = ""
-    activeGeneration = -1
-    activeDirectoryCache = ({})
-    activePendingChildren = ({})
-    activeDirectoryCount = 0
-    activeComplete = null
-    scanAcceptingRecords = false
-    scanDeadlineTimer.stop()
-    scanKillTimer.stop()
-    scanTerminationRequested = false
-    scanTerminationRequestId = ""
-    scanStderrBytes = 0
-    clearScanQueue()
+    if (message.type === "queryResult" && expected.operation === "search") {
+      finishBrokerRequest(message.requestId)
+      if (!searchState || message.requestId !== searchRequestId
+          || message.generationId !== activeGenerationId
+          || expected.activationToken !== searchState.sessionId
+          || message.operation !== "search") return
+      searchOutstanding = 0
+      searchRequestId = ""
+      var searchResultRows = validateQueryResult(message, "search")
+      if (searchResultRows === null || !validContinuation(message.result)) {
+        searchState.loading = false
+        searchState.error = "Search response was invalid."
+        searchRunning = false
+        return
+      }
+      var searchError = SearchState.putPage(searchState,
+        searchState.pages.length > 0
+          ? SearchState.currentPage(searchState).continuation : "",
+        searchResultRows, message.result.hasMore, message.result.continuation,
+        validateDirectoryRow)
+      if (searchError !== "") {
+        searchState.error = searchError
+        searchRunning = false
+        return
+      }
+      searchRunning = false
+      renderSearchPage("")
+      return
+    }
+    if (message.type === "queryResult" && pendingNavigation[message.requestId]) {
+      var navigation = pendingNavigation[message.requestId]
+      if (message.generationId !== activeGenerationId
+          || message.generationId !== expected.generationId
+          || message.operation !== expected.operation) return
+      var navigationRows = validateQueryResult(message, expected.operation)
+      if (navigationRows === null || !validContinuation(message.result)) {
+        delete pendingNavigation[message.requestId]
+        finishBrokerRequest(message.requestId)
+        showNavigationError("Snapshot navigation response was invalid.")
+        return
+      }
+      delete pendingNavigation[message.requestId]
+      finishBrokerRequest(message.requestId)
+      if (navigation.kind === "children") {
+        var pageResult = BrowserState.putPage(browserState, navigation.parent,
+          navigation.continuation, navigationRows, message.result.hasMore,
+          message.result.continuation, navigation.previousPageKey, validateDirectoryRow)
+        if (pageResult.error !== "") { showNavigationError(pageResult.error); return }
+        if (navigation.expandAfter
+            && !BrowserState.expand(browserState, navigation.parent, pageResult.key,
+                                    currentAncestorPaths())) {
+          showNavigationError("Expansion-state limit is fully pinned.")
+          return
+        }
+        BrowserState.setPage(browserState, navigation.parent, pageResult.key)
+        rebuildVisibleWindow(navigation.parent)
+        updateBrowserHighWater()
+        return
+      }
+      if (navigation.kind === "revealAncestors") {
+        if (!revealState || revealState.sessionId !== navigation.sessionId
+            || revealState.generationId !== activeGenerationId) return
+        var revealCombined = navigation.rows.concat(navigationRows)
+        if (revealCombined.length > maxBreadcrumbRows)
+          revealCombined = revealCombined.slice(0, maxBreadcrumbRows)
+        if (message.result.hasMore && revealCombined.length < maxBreadcrumbRows) {
+          var revealMore = sendBrokerRequest("ancestors", {
+            generationId: activeGenerationId, path: navigation.path,
+            continuation: message.result.continuation
+          }, 3000, activeGenerationId, "reveal:" + navigation.sessionId)
+          if (revealMore) pendingNavigation[revealMore] = {
+            kind: "revealAncestors", path: navigation.path, rows: revealCombined,
+            continuation: message.result.continuation, sessionId: navigation.sessionId
+          }
+          return
+        }
+        var revealError = BrowserState.insertRows(browserState, revealCombined, validateDirectoryRow)
+        if (revealError !== "") { showNavigationError(revealError); revealState = null; return }
+        BrowserState.setBreadcrumbs(browserState, revealCombined, message.result.hasMore)
+        revealState.chain = revealCombined.slice().reverse()
+        revealState.index = 1
+        browserViewRootPath = revealState.chain[0].path
+        continueReveal()
+        return
+      }
+      if (navigation.kind === "revealPage") {
+        if (!revealState || revealState.sessionId !== navigation.sessionId
+            || revealState.generationId !== activeGenerationId) return
+        if (navigationRows.length === 0 || navigationRows[0].path !== navigation.child) {
+          showNavigationError("Snapshot could not reveal the selected result.")
+          revealState = null
+          return
+        }
+        var revealPage = BrowserState.putPage(browserState, navigation.parent,
+          "reveal:" + navigation.child, navigationRows, message.result.hasMore,
+          message.result.continuation, "", validateDirectoryRow)
+        if (revealPage.error !== ""
+            || !BrowserState.expand(browserState, navigation.parent, revealPage.key,
+                                    revealState.chain.slice(0, revealState.index))) {
+          showNavigationError(revealPage.error || "Reveal exceeded bounded navigation state.")
+          revealState = null
+          return
+        }
+        revealState.index++
+        continueReveal()
+        return
+      }
+      if (navigation.kind === "ancestors") {
+        if (navigation.path !== selectedTreePath) {
+          breadcrumbRequestRunning = false
+          breadcrumbDebounce.restart()
+          return
+        }
+        var combined = navigation.rows.concat(navigationRows)
+        if (combined.length > maxBreadcrumbRows) combined = combined.slice(0, maxBreadcrumbRows)
+        var rowError = BrowserState.insertRows(browserState, navigationRows, validateDirectoryRow)
+        if (rowError !== "") { showNavigationError(rowError); return }
+        if (message.result.hasMore && combined.length < maxBreadcrumbRows) {
+          var ancestorRequest = sendBrokerRequest("ancestors", {
+            generationId: activeGenerationId, path: navigation.path,
+            continuation: message.result.continuation
+          }, 3000, activeGenerationId, "")
+          if (ancestorRequest !== "") pendingNavigation[ancestorRequest] = {
+            kind: "ancestors", path: navigation.path, rows: combined,
+            continuation: message.result.continuation
+          }
+          else breadcrumbRequestRunning = false
+          return
+        }
+        BrowserState.setBreadcrumbs(browserState, combined, message.result.hasMore)
+        breadcrumbRequestRunning = false
+        rebuildBreadcrumb()
+        if (breadcrumbTarget !== navigation.path) breadcrumbDebounce.restart()
+        return
+      }
+    }
+    if (message.type === "queryResult"
+        && (expected.operation === "metadata" || expected.operation === "children")) {
+      if (message.generationId !== expected.generationId || !pendingActivation
+          || pendingActivation.token !== expected.activationToken
+          || pendingActivation.generationId !== message.generationId
+          || message.operation !== expected.operation) return
+      var rows = validateQueryResult(message, expected.operation)
+      if (rows === null || (expected.operation === "metadata" && rows.length !== 1)) {
+        abortPendingActivation("Snapshot initial view was invalid.")
+        return
+      }
+      if (expected.operation === "metadata") pendingActivation.metadata = rows[0]
+      else {
+        if (!validContinuation(message.result)) {
+          abortPendingActivation("Snapshot initial continuation was invalid.")
+          return
+        }
+        pendingActivation.children = rows
+        pendingActivation.childrenHasMore = message.result.hasMore
+        pendingActivation.childrenContinuation = message.result.continuation
+      }
+      activationRowsHighWater = Math.max(activationRowsHighWater,
+        (pendingActivation.metadata ? 1 : 0)
+          + (pendingActivation.children ? pendingActivation.children.length : 0))
+      finishBrokerRequest(message.requestId)
+      if (pendingActivation.metadata && pendingActivation.children)
+        requestActivationCommit()
+      return
+    }
+    if (message.type === "activationCommitted" && expected.operation === "activationCommit") {
+      if (!pendingActivation || message.generationId !== pendingActivation.generationId
+          || expected.activationToken !== pendingActivation.token) return
+      finishBrokerRequest(message.requestId)
+      commitInitialView()
+      return
+    }
+    if (message.type === "activationAborted" && expected.operation === "activationAbort") {
+      finishBrokerRequest(message.requestId)
+      return
+    }
+    if (message.type === "scanCancelRequested" && expected.operation === "scanCancel") {
+      finishBrokerRequest(message.requestId)
+      return
+    }
+    if (message.type === "error") {
+      if (pendingNavigation[message.requestId]) {
+        if (pendingNavigation[message.requestId].kind === "ancestors")
+          breadcrumbRequestRunning = false
+        if (pendingNavigation[message.requestId].kind.indexOf("reveal") === 0)
+          revealState = null
+        delete pendingNavigation[message.requestId]
+        finishBrokerRequest(message.requestId)
+        showNavigationError(String(message.error || "Snapshot navigation failed."))
+        return
+      }
+      if (expected.operation === "search") {
+        finishBrokerRequest(message.requestId)
+        if (message.requestId === searchRequestId && searchState) {
+          searchOutstanding = 0
+          searchRequestId = ""
+          searchRunning = false
+          searchState.loading = false
+          searchState.error = String(message.error || "Search failed.").slice(0, 1024)
+        }
+        return
+      }
+      finishBrokerRequest(message.requestId)
+      if (expected.operation === "metadata" || expected.operation === "children")
+        abortPendingActivation(String(message.error || "Initial snapshot query failed."))
+      else if (expected.operation === "hello" || expected.operation === "activationCommit")
+        failBroker(String(message.error || "Snapshot backend request failed."))
+      return
+    }
+  }
+
+  function requestActivationCommit() {
+    if (!pendingActivation) return
+    sendBrokerRequest("activationCommit", {
+      generationId: pendingActivation.generationId
+    }, 3000, pendingActivation.generationId, pendingActivation.token)
+  }
+
+  function continueReveal() {
+    if (!revealState) return
+    if (revealState.index >= revealState.chain.length) {
+      var selected = revealState.path
+      revealState = null
+      clearSearchState(false)
+      searchField.text = ""
+      searchQuery = ""
+      selectedTreePath = selected
+      browserState.selection = selected
+      rebuildVisibleWindow(selected)
+      rebuildBreadcrumb()
+      return
+    }
+    var child = revealState.chain[revealState.index]
+    var parent = revealState.chain[revealState.index - 1]
+    var requestId = sendBrokerRequest("childrenAt", {
+      generationId: activeGenerationId, path: child.path
+    }, 3000, activeGenerationId, "reveal:" + revealState.sessionId)
+    if (requestId) pendingNavigation[requestId] = {
+      kind: "revealPage", child: child.path, parent: parent.path,
+      sessionId: revealState.sessionId
+    }
+  }
+
+  function abortPendingActivation(message) {
+    var failed = pendingActivation
+    if (!failed) return
+    pendingActivation = null
+    var related = []
+    for (var requestId in brokerRequests) {
+      if (brokerRequests[requestId].activationToken === failed.token)
+        related.push(requestId)
+    }
+    for (var index = 0; index < related.length; index++)
+      finishBrokerRequest(related[index])
+    brokerError = String(message || "Snapshot activation failed.").slice(0, 1024)
+    sendBrokerRequest("activationAbort", {
+      generationId: failed.generationId
+    }, 3000, failed.generationId, failed.token)
+    snapshotState = activeGenerationId !== ""
+      ? (activeBackendAvailable ? "complete" : "backend-unavailable") : "failed"
+    launchPendingScan()
+  }
+
+  function commitInitialView() {
+    var activation = pendingActivation
+    if (!activation) return
+    var metadata = activation.metadata
+    var children = activation.children
+    var nextState = BrowserState.create(browserLimits(), activation.generationId)
+    var metadataError = BrowserState.putMetadata(nextState, metadata, validateDirectoryRow)
+    var pageResult = BrowserState.putPage(nextState, metadata.path, "", children,
+      !!activation.childrenHasMore, activation.childrenContinuation, "", validateDirectoryRow)
+    if (metadataError !== "" || pageResult.error !== ""
+        || !BrowserState.expand(nextState, metadata.path, pageResult.key, [metadata.path])) {
+      failBroker("Committed snapshot could not enter the bounded frontend cache.")
+      return
+    }
+    nextState.selection = children.length > 0 ? children[0].path : metadata.path
+    BrowserState.setBreadcrumbs(nextState, [metadata], false)
+    // This assignment is the frontend generation swap. No A cache object is
+    // copied into B, and no normal property retains the old state afterward.
+    clearNavigationRequests()
+    clearSearchState(false)
+    revealState = null
+    browserState = nextState
+    browserViewRootPath = metadata.path
+    activeRootMetadata = metadata
+    activeGenerationId = activation.generationId
+    activeBackendAvailable = true
+    updateGenerationHighWater()
+    treeRootPath = metadata.path
+    snapshotDirectoryCount = activation.summary.directoryCount
+    snapshotDurationMs = activation.summary.durationMs
+    snapshotState = "complete"
+    selectedTreePath = nextState.selection
+    pendingActivation = null
     progressEntries = 0
     progressBytes = 0
+    rebuildVisibleWindow(selectedTreePath)
+    rebuildBreadcrumb()
+    launchPendingScan()
+  }
+
+  function launchPendingScan() {
     var next = pendingScan
     pendingScan = null
-    if (next && next.generation === treeGeneration) Qt.callLater(function() { launchScan(next) })
+    if (next && next.generation === treeGeneration)
+      Qt.callLater(function() { launchScan(next) })
   }
 
   function moveTreeSelection(delta) {
@@ -670,19 +1298,32 @@ Item {
     var next = Math.max(0, Math.min(treeRows.count - 1, selectedTreeIndex + delta))
     selectedTreeIndex = next
     selectedTreePath = treeRows.get(next).nodePath
+    if (browserState) browserState.selection = selectedTreePath
     treeView.positionViewAtIndex(next, ListView.Contain)
     rebuildBreadcrumb()
   }
 
   function expandSelected() {
-    var node = treeCache[selectedTreePath]
-    if (node && node.childDirectoryCount > 0 && !node.expanded) toggleNode(node.path)
+    if (selectedTreePath !== "") toggleNode(selectedTreePath)
   }
 
   function collapseSelected() {
-    var node = treeCache[selectedTreePath]
-    if (node && node.expanded) toggleNode(node.path)
-    else if (node && node.parentPath) selectTreePath(node.parentPath, false)
+    if (!browserState || !selectedTreePath) return
+    if (browserState.expansions[selectedTreePath]) {
+      BrowserState.collapse(browserState, selectedTreePath)
+      rebuildVisibleWindow(selectedTreePath)
+      return
+    }
+    var row = rowForPath(selectedTreePath)
+    if (row && row.parent_path) selectTreePath(row.parent_path, false)
+  }
+
+  function pageCurrentParent(forward) {
+    if (!browserState || !selectedTreePath) return
+    var row = rowForPath(selectedTreePath)
+    var parent = row && row.parent_path ? row.parent_path : selectedTreePath
+    if (forward) nextChildPage(parent)
+    else previousChildPage(parent)
   }
 
   ListModel { id: filesystemModel }
@@ -728,35 +1369,60 @@ Item {
   }
 
   Process {
-    id: scanProcess
-    stdout: SplitParser { onRead: function(line) { root.enqueueScanLine(line) } }
-    stderr: SplitParser { onRead: function(line) { root.appendScanStderr(line) } }
+    id: brokerProcess
+    stdinEnabled: true
+    stdout: SplitParser { onRead: function(line) { root.enqueueBrokerLine(line) } }
+    stderr: SplitParser { onRead: function(line) { root.appendBrokerStderr(line) } }
+    onStarted: {
+      root.sendBrokerRequest("hello", {}, 15000, "", "")
+    }
     onExited: function(exitCode) {
-      scanDeadlineTimer.stop()
-      scanKillTimer.stop()
-      scanTerminationRequested = false
-      scanTerminationRequestId = ""
-      root.activeExitCode = exitCode
-      root.scanProcessExited = true
-      root.maybeSettleScan()
+      brokerHandshakeTimer.stop()
+      brokerKillTimer.stop()
+      brokerTerminationRequested = false
+      brokerReady = false
+      activeBackendAvailable = false
+      clearBrokerQueue()
+      clearBrokerRequests()
+      scanRequestId = ""
+      stagingGenerationId = ""
+      pendingActivation = null
+      if (!brokerExpectedStop) {
+        brokerError = "Snapshot backend stopped unexpectedly. Refresh to start a new scan."
+        snapshotState = activeGenerationId !== "" ? "backend-unavailable" : "failed"
+      }
+      brokerExpectedStop = false
     }
   }
 
-  // Qt timers do not run with a zero interval in the installed Quickshell/Qt
-  // combination. One millisecond retains batched UI updates without stalling.
-  Timer { id: scanDrainTimer; interval: 1; repeat: true; onTriggered: root.drainScanLines() }
+  Timer { id: brokerDrainTimer; interval: 1; repeat: true; onTriggered: root.drainBrokerLines() }
+  Timer { id: breadcrumbDebounce; interval: 35; onTriggered: root.launchBreadcrumbQuery() }
+  Timer { id: searchDebounce; interval: 220; onTriggered: root.beginSearch() }
   Timer {
-    id: scanDeadlineTimer
-    interval: 60 * 60 * 1000
-    onTriggered: root.failActiveScan("Directory scan timed out after 60 minutes.")
+    id: brokerHandshakeTimer
+    interval: 15000
+    onTriggered: root.failBroker("Snapshot backend did not complete its startup handshake.")
   }
   Timer {
-    id: scanKillTimer
+    id: brokerKillTimer
     interval: 2000
     onTriggered: {
-      if (scanProcess.running && root.scanTerminationRequested
-          && root.scanTerminationRequestId === root.activeRequestId)
-        scanProcess.signal(9)
+      if (brokerProcess.running && root.brokerTerminationRequested)
+        brokerProcess.signal(9)
+    }
+  }
+  Timer {
+    id: brokerRequestDeadline
+    interval: 250
+    repeat: true
+    onTriggered: {
+      var now = Date.now()
+      for (var requestId in root.brokerRequests) {
+        if (root.brokerRequests[requestId].deadline <= now) {
+          root.failBroker("Snapshot backend request timed out.")
+          return
+        }
+      }
     }
   }
   Timer {
@@ -780,8 +1446,6 @@ Item {
     }
   }
   Timer { interval: 250; repeat: true; running: root.scanning; onTriggered: root.scanElapsedSeconds = (Date.now() - root.scanStartedAt) / 1000 }
-  Timer { id: searchDebounce; interval: 180; onTriggered: root.beginSearch() }
-  Timer { id: searchTimer; interval: 1; repeat: true; onTriggered: root.searchBatch() }
   Timer { id: feedbackTimer; interval: 1800; onTriggered: root.actionFeedback = "" }
 
   PanelWindow {
@@ -836,8 +1500,12 @@ Item {
           if (event.key === Qt.Key_Escape) root.dismiss()
           else if (event.key === Qt.Key_Down || event.key === Qt.Key_J) root.moveTreeSelection(1)
           else if (event.key === Qt.Key_Up || event.key === Qt.Key_K) root.moveTreeSelection(-1)
-          else if (event.key === Qt.Key_Right || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) root.expandSelected()
-          else if (event.key === Qt.Key_Left) root.collapseSelected()
+          else if (event.key === Qt.Key_Right || event.key === Qt.Key_L || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) root.expandSelected()
+          else if (event.key === Qt.Key_Left || event.key === Qt.Key_H || event.key === Qt.Key_Backspace) root.collapseSelected()
+          else if (event.key === Qt.Key_Home) root.moveTreeSelection(-root.treeRows.count)
+          else if (event.key === Qt.Key_End) root.moveTreeSelection(root.treeRows.count)
+          else if (event.key === Qt.Key_PageDown) root.moveTreeSelection(Math.max(1, Math.floor(treeView.height / Style.space(34))))
+          else if (event.key === Qt.Key_PageUp) root.moveTreeSelection(-Math.max(1, Math.floor(treeView.height / Style.space(34))))
           else return
           event.accepted = true
         }
@@ -967,9 +1635,17 @@ Item {
               BusyIndicator { running: root.scanning; implicitWidth: Style.space(20); implicitHeight: Style.space(20) }
               ColumnLayout {
                 Layout.fillWidth: true; spacing: 0
-                Text { Layout.fillWidth: true; text: "Scanning " + root.activePath + "…"; color: Color.popups.text; font.family: Style.font.family; font.pixelSize: Style.font.body; elide: Text.ElideMiddle }
+                Text { Layout.fillWidth: true; text: "Scanning " + root.treeRootPath + "…"; color: Color.popups.text; font.family: Style.font.family; font.pixelSize: Style.font.body; elide: Text.ElideMiddle }
                 Text { text: root.progressEntries.toLocaleString() + " entries · " + TreeModel.formatBytes(root.progressBytes) + " processed · " + root.scanElapsedSeconds.toFixed(1) + " s"; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
               }
+            }
+            Text {
+              Layout.fillWidth: true
+              visible: root.brokerError !== ""
+              text: root.brokerError
+              color: Color.urgent
+              font.family: Style.font.family; font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideRight
             }
 
             RowLayout {
@@ -984,9 +1660,9 @@ Item {
               TextField {
                 id: searchField
                 Layout.fillWidth: true
-                placeholderText: "Search directories in this snapshot…"
+                placeholderText: "Search directories"
                 foreground: Color.popups.text; accent: Color.accent
-                enabled: root.snapshotState === "complete"
+                enabled: root.activeBackendAvailable
                 onTextChanged: { root.searchQuery = text; root.scheduleSearch() }
                 Keys.onEscapePressed: { text = ""; focus = false; keyCatcher.forceActiveFocus() }
               }
@@ -1008,7 +1684,7 @@ Item {
                     required property string crumbPath
                     height: breadcrumbRow.height; spacing: Style.space(4)
                     Text { visible: index > 0; anchors.verticalCenter: parent.verticalCenter; text: "›"; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
-                    Button { anchors.verticalCenter: parent.verticalCenter; text: crumbName; foreground: Color.popups.text; onClicked: root.selectTreePath(crumbPath, true) }
+                    Button { anchors.verticalCenter: parent.verticalCenter; text: crumbName; foreground: Color.popups.text; enabled: crumbPath !== ""; onClicked: root.selectTreePath(crumbPath, true) }
                   }
                 }
               }
@@ -1027,6 +1703,13 @@ Item {
                   Text { Layout.fillWidth: true; text: root.searchQuery.trim() === "" ? "Name" : "Name / path"; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
                   Text { Layout.preferredWidth: Style.space(94); text: "Size"; horizontalAlignment: Text.AlignRight; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
                   Text { Layout.preferredWidth: Style.space(64); text: "% Parent"; horizontalAlignment: Text.AlignRight; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
+                }
+                RowLayout {
+                  Layout.fillWidth: true; Layout.preferredHeight: Style.space(28)
+                  Button { text: "Previous page"; foreground: Color.popups.text; enabled: root.activeBackendAvailable; onClicked: root.searchState ? root.previousSearchPage() : root.pageCurrentParent(false) }
+                  Button { text: "Next page"; foreground: Color.popups.text; enabled: root.activeBackendAvailable; onClicked: root.searchState ? root.nextSearchPage() : root.pageCurrentParent(true) }
+                  Item { Layout.fillWidth: true }
+                  Text { text: "Up/Down · Enter expand · Left parent"; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
                 }
                 Rectangle { Layout.fillWidth: true; height: 1; color: Color.popups.border; opacity: 0.3 }
               ListView {
@@ -1085,12 +1768,15 @@ Item {
                 Text {
                   anchors.centerIn: parent
                   visible: treeRows.count === 0 && !root.discoveryLoading
-                  text: root.discoveryError !== "" ? root.discoveryError : root.searchRunning ? "Searching snapshot…" : root.searchQuery.trim() !== "" ? "No matching directories" : "No directory data"
+                  text: root.discoveryError !== "" ? root.discoveryError
+                    : root.searchRunning ? "Searching snapshot…"
+                    : root.searchState && root.searchState.error !== "" ? root.searchState.error
+                    : root.searchQuery.trim() !== "" ? "No matching directories" : "No directory data"
                   color: root.discoveryError !== "" ? Color.urgent : Color.muted
                   font.family: Style.font.family; font.pixelSize: Style.font.body
                 }
               }
-              Text { Layout.fillWidth: true; visible: root.searchQuery.trim() !== "" && !root.searchRunning; text: root.searchMatchCount > root.searchResultLimit ? "Showing the largest " + root.searchResultLimit + " of " + root.searchMatchCount.toLocaleString() + " matches" : root.searchMatchCount.toLocaleString() + " matches"; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; horizontalAlignment: Text.AlignRight }
+              Text { Layout.fillWidth: true; visible: false; text: ""; color: Color.muted }
               }
             }
           }

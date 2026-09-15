@@ -13,7 +13,7 @@ REPOSITORY = Path(__file__).resolve().parents[1]
 
 
 class QmlScanPipelineTests(unittest.TestCase):
-    def run_quickshell_fixture(self, fixture, marker, timeout=60):
+    def run_quickshell_fixture(self, fixture, marker, timeout=60, broker_tree=False):
         quickshell = shutil.which("quickshell")
         if quickshell is None:
             self.skipTest("quickshell is not installed")
@@ -24,7 +24,16 @@ class QmlScanPipelineTests(unittest.TestCase):
             shutil.copy2(REPOSITORY / "tests/qml" / fixture, config_dir)
             shutil.copy2(REPOSITORY / "TreeModel.js", config_dir)
             shutil.copy2(REPOSITORY / "FrontendSafety.js", config_dir)
+            shutil.copy2(REPOSITORY / "BrowserState.js", config_dir)
+            shutil.copy2(REPOSITORY / "SearchState.js", config_dir)
             env = os.environ.copy()
+            if broker_tree:
+                scan_root = Path(runtime) / "broker-tree"
+                scan_root.mkdir()
+                for index in range(2000):
+                    (scan_root / f"directory-{index:04d}").mkdir()
+                for index in range(10):
+                    (scan_root / "directory-0000" / f"nested-{index:02d}").mkdir()
             env.pop("DISPLAY", None)
             env.update({
                 "QT_QPA_PLATFORM": "offscreen",
@@ -33,6 +42,8 @@ class QmlScanPipelineTests(unittest.TestCase):
                 "XDG_RUNTIME_DIR": runtime,
                 "OMATREE_TEST_REPOSITORY": str(REPOSITORY),
             })
+            if broker_tree:
+                env["OMATREE_TEST_SCAN_PATH"] = str(scan_root)
             process = subprocess.Popen(
                 [quickshell, "-p", str(config_dir / fixture)],
                 cwd=REPOSITORY, env=env, stdout=subprocess.PIPE,
@@ -67,6 +78,7 @@ class QmlScanPipelineTests(unittest.TestCase):
                 if process.stdout is not None:
                     process.stdout.close()
             self.assertTrue(passed, "".join(output))
+            return "".join(output)
 
     def test_bar_widget_manifest_and_safety_contract(self):
         manifest = json.loads((REPOSITORY / "manifest.json").read_text(encoding="utf-8"))
@@ -82,16 +94,13 @@ class QmlScanPipelineTests(unittest.TestCase):
         self.assertNotIn('"scan"', widget)
         self.assertNotIn("requestScan", widget)
 
-    def test_panel_uses_a_runnable_queue_timer(self):
+    def test_panel_uses_a_runnable_broker_queue_timer(self):
         panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
         self.assertIn(
-            "Timer { id: scanDrainTimer; interval: 1; repeat: true;",
+            "Timer { id: brokerDrainTimer; interval: 1; repeat: true;",
             panel,
         )
-        self.assertNotIn(
-            "Timer { id: scanDrainTimer; interval: 0;",
-            panel,
-        )
+        self.assertNotIn("Timer { id: brokerDrainTimer; interval: 0;", panel)
 
     def test_completed_tree_navigation_never_requests_another_scan(self):
         panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
@@ -99,28 +108,29 @@ class QmlScanPipelineTests(unittest.TestCase):
             "function retryNode(path)", 1
         )[0]
         self.assertNotIn("requestScan", toggle)
-        self.assertIn("if (!filesystem || !node || path !== treeRootPath) return", panel)
-        self.assertIn("if (activeGeneration !== treeGeneration) return", panel)
-        self.assertEqual(panel.count("Process {\n    id: scanProcess"), 1)
+        self.assertNotIn('sendBrokerRequest("scanStart"', toggle)
+        self.assertIn('sendBrokerRequest("children"', toggle)
+        self.assertNotIn("scanProcess", panel)
+        self.assertEqual(panel.count("Process {\n    id: brokerProcess"), 1)
 
     def test_search_and_reveal_never_request_scans(self):
         panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
-        search = panel.split("function beginSearch()", 1)[1].split(
+        self.assertNotIn("Object.keys(treeCache)", panel)
+        self.assertNotIn("TreeModel.searchMatches", panel)
+        self.assertIn('placeholderText: "Search directories"', panel)
+        self.assertIn('sendBrokerRequest("search"', panel)
+        search = panel.split("function scheduleSearch()", 1)[1].split(
             "function copySelectedPath()", 1
         )[0]
         self.assertNotIn("requestScan", search)
-        self.assertNotIn("scanProcess", search)
-        self.assertIn("TreeModel.revealPath(treeCache, path)", panel)
-        self.assertIn("searchResultLimit: 500", panel)
 
     def test_actions_use_safe_argument_arrays(self):
         panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
         self.assertIn(
             '["/usr/bin/python3", helperPath, "discover"]', panel
         )
-        self.assertIn(
-            '"/usr/bin/python3", helperPath, "scan"', panel
-        )
+        self.assertIn('brokerProcess.command = [brokerPath]', panel)
+        self.assertNotIn('helperPath, "scan"', panel)
         self.assertIn('copyProcess.command = ["/usr/bin/wl-copy"]', panel)
         self.assertIn(
             'Quickshell.execDetached(["/usr/bin/xdg-open", selectedTreePath])',
@@ -137,66 +147,47 @@ class QmlScanPipelineTests(unittest.TestCase):
             "function copySelectedPath()", 1
         )[0]
         self.assertNotIn("requestScan", toggle + choose)
-        self.assertEqual(panel.count("requestScan(mountpoint)"), 1)
+        self.assertEqual(panel.count('sendBrokerRequest("scanStart"'), 1)
 
     def test_refresh_has_one_filesystem_scan_entrypoint(self):
         panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
         selection = panel.split("function selectFilesystem(index)", 1)[1].split(
             "function rebuildTreeRows()", 1
         )[0]
-        self.assertEqual(selection.count("requestScan(mountpoint)"), 1)
+        self.assertEqual(selection.count("requestScan(mountpoint)"), 2)
 
-    def test_stale_generation_is_rejected_before_staging(self):
+    def test_stale_generation_is_rejected_before_activation_staging(self):
         panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
-        handler = panel.split("function handleScanLine(rawLine)", 1)[1].split(
-            "function enqueueScanLine(line)", 1
+        handler = panel.split("function handleBrokerLine(rawLine)", 1)[1].split(
+            "function requestActivationCommit()", 1
         )[0]
-        generation_guard = handler.index("if (activeGeneration !== treeGeneration) return")
-        directory_stage = handler.index("TreeModel.stageDirectory")
-        self.assertLess(generation_guard, directory_stage)
+        self.assertIn("message.generationId !== expected.generationId", handler)
+        self.assertIn("pendingActivation.token !== expected.activationToken", handler)
 
-    def test_bounded_queue_and_failure_contract(self):
+    def test_bounded_broker_queue_and_failure_contract(self):
         panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
-        self.assertIn("maxQueuedScanLines: 4096", panel)
-        self.assertIn("maxQueuedScanBytes: 16 * 1024 * 1024", panel)
-        self.assertIn("maxEventBytes: 64 * 1024", panel)
-        self.assertIn("maxStagedDirectories: 500000", panel)
+        self.assertIn("maxBrokerQueueLines: 256", panel)
+        self.assertIn("maxBrokerQueueBytes: 4 * 1024 * 1024", panel)
+        self.assertIn("maxBrokerLineBytes: 1024 * 1024", panel)
+        self.assertIn("maxBrokerRows: 64", panel)
         self.assertIn("maxPathBytes: 4096", panel)
-        enqueue = panel.split("function enqueueScanLine(line)", 1)[1].split(
-            "function drainScanLines()", 1
+        enqueue = panel.split("function enqueueBrokerLine(line)", 1)[1].split(
+            "function drainBrokerLines()", 1
         )[0]
-        self.assertLess(enqueue.index("queueLimitError"), enqueue.index("scanLineQueue.push"))
-        failure = panel.split("function failActiveScan(message)", 1)[1].split(
+        self.assertLess(enqueue.index("brokerQueueLimitError"), enqueue.index("brokerLineQueue.push"))
+        failure = panel.split("function failBroker(message)", 1)[1].split(
             "function resetDiscoveryOutput()", 1
         )[0]
-        self.assertIn("activeComplete = null", failure)
-        self.assertIn("scanAcceptingRecords = false", failure)
-        self.assertIn("clearScanQueue()", failure)
-        deadline = panel.split("id: scanDeadlineTimer", 1)[1].split("Timer {", 1)[0]
-        self.assertIn("failActiveScan", deadline)
-        settle = panel.split("function settleScan()", 1)[1].split(
-            "function moveTreeSelection", 1
-        )[0]
-        self.assertIn("clearScanQueue()", settle)
-        launch = panel.split("function launchScan(request)", 1)[1].split(
-            "function cancelActiveScan()", 1
-        )[0]
-        cancel = panel.split("function cancelActiveScan()", 1)[1].split(
-            "function handleScanLine", 1
-        )[0]
-        close = panel.split("function close()", 1)[1].split(
-            "function dismiss()", 1
-        )[0]
-        self.assertIn("clearScanQueue()", launch)
-        self.assertIn("clearScanQueue()", cancel)
-        self.assertIn("cancelActiveScan()", close)
+        self.assertIn("clearBrokerQueue()", failure)
+        self.assertIn("clearBrokerRequests()", failure)
+        self.assertIn("activeBackendAvailable = false", failure)
 
     def test_process_deadline_and_signal_contracts(self):
         panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
         widget = (REPOSITORY / "BarWidget.qml").read_text(encoding="utf-8")
-        self.assertIn("scanProcess.signal(15)", panel)
-        self.assertIn("scanProcess.signal(9)", panel)
-        self.assertIn("interval: 60 * 60 * 1000", panel)
+        self.assertIn("brokerProcess.signal(15)", panel)
+        self.assertIn("brokerProcess.signal(9)", panel)
+        self.assertIn("60 * 60 * 1000 + 10000", panel)
         self.assertIn("interval: 15000", panel)
         self.assertIn("interval: 2000", panel)
         self.assertIn("discoveryProcess.signal(15)", panel)
@@ -212,6 +203,57 @@ class QmlScanPipelineTests(unittest.TestCase):
         )[0]
         self.assertNotIn("filesystem =", bar_failure)
 
+    def test_panel_has_no_full_tree_scan_or_staging_path(self):
+        panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
+        for forbidden in (
+            "stageDirectory", "finalizeTree", "activeDirectoryCache",
+            "activePendingChildren", 'message.type === "directory"',
+            "Object.keys(treeCache)", "treeCache",
+        ):
+            self.assertNotIn(forbidden, panel)
+        self.assertIn('sendBrokerRequest("metadata"', panel)
+        self.assertIn('sendBrokerRequest("children"', panel)
+        self.assertIn("message.result.rows.length > maxBrokerRows", panel)
+
+    def test_atomic_activation_waits_for_bounded_queries_and_commit_ack(self):
+        panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
+        activated = panel.split('if (message.type === "snapshotActivated")', 1)[1].split(
+            'if (message.type === "queryResult"', 1
+        )[0]
+        self.assertIn('sendBrokerRequest("metadata"', activated)
+        self.assertIn('sendBrokerRequest("children"', activated)
+        self.assertNotIn("activeGenerationId =", activated)
+        commit = panel.split("function commitInitialView()", 1)[1].split(
+            "function launchPendingScan()", 1
+        )[0]
+        self.assertIn("browserState = nextState", commit)
+        self.assertIn("rebuildVisibleWindow", commit)
+        self.assertIn("activeGenerationId = activation.generationId", commit)
+
+    def test_broker_identity_crash_and_memory_high_water_contract(self):
+        panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
+        handler = panel.split("function handleBrokerLine(rawLine)", 1)[1].split(
+            "function requestActivationCommit()", 1
+        )[0]
+        self.assertIn("if (!expected) return", handler)
+        self.assertIn("message.operation !== expected.operation", handler)
+        self.assertIn("message.result.rows.length > maxBrokerRows", panel)
+        self.assertIn("failBroker(envelopeError)", handler)
+        exited = panel.split("onExited: function(exitCode)", 2)[2].split("}", 1)[0]
+        self.assertIn("activeBackendAvailable = false", exited)
+        self.assertNotIn("treeRows.clear()", exited)
+        self.assertIn("maxDiagnosticBytes: 64 * 1024", panel)
+        for metric in (
+            "brokerQueueLinesHighWater", "brokerQueueBytesHighWater",
+            "brokerRequestsHighWater", "activationRowsHighWater",
+            "activeRowsHighWater", "generationIdsHighWater",
+            "warningRowsHighWater",
+            "cachedDirectoryRowsHighWater", "cachedPagesHighWater",
+            "visibleRowsHighWater", "expansionStatesHighWater",
+            "breadcrumbRowsHighWater", "metadataRowsHighWater",
+        ):
+            self.assertIn(metric, panel)
+
     def test_security_boundaries_and_escalation_offscreen(self):
         self.run_quickshell_fixture(
             "SecurityHarness.qml", "OMATREE_SECURITY_PASS", timeout=10
@@ -221,6 +263,95 @@ class QmlScanPipelineTests(unittest.TestCase):
         self.run_quickshell_fixture(
             "ScanPipeline.qml", "OMATREE_PIPELINE_PASS"
         )
+
+    def test_actual_broker_bounded_activation_pipeline_offscreen(self):
+        self.run_quickshell_fixture(
+            "BrokerPipeline.qml", "OMATREE_BROKER_PIPELINE_PASS",
+            timeout=30, broker_tree=True,
+        )
+
+    def test_actual_qml_bounded_browser_state_offscreen(self):
+        output = self.run_quickshell_fixture(
+            "BrowserStateHarness.qml", "OMATREE_BROWSER_STATE_PASS", timeout=30
+        )
+        self.assertRegex(output, r"rows=\d+ pages=24 expansions=256 visible=512 breadcrumbs=128 metadata=1 flat500kMs=\d+")
+
+    def test_stage5_hard_limits_and_broker_only_navigation(self):
+        panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
+        browser = (REPOSITORY / "BrowserState.js").read_text(encoding="utf-8")
+        for value in (
+            "childPageRows: 64", "maxCachedDirectoryRows: 2048",
+            "maxCachedPages: 24", "maxVisibleRows: 512",
+            "maxExpansionStates: 256", "maxBreadcrumbRows: 128",
+            "maxMetadataCacheRows: 256",
+        ):
+            self.assertIn(value, panel)
+        self.assertIn('sendBrokerRequest("children"', panel)
+        self.assertIn('sendBrokerRequest("ancestors"', panel)
+        self.assertNotIn('helperPath, "scan"', panel)
+        self.assertIn("while (state.rowCount + needed > state.limits.maxRows)", browser)
+        self.assertIn("while (state.pageCount >= state.limits.maxPages)", browser)
+        self.assertIn("while (state.expansionCount >= state.limits.maxExpansions)", browser)
+        self.assertIn("output.length < state.limits.maxVisible", browser)
+
+    def test_stage6_search_is_broker_backed_and_bounded(self):
+        panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
+        self.assertIn('sendBrokerRequest("search"', panel)
+        self.assertIn("maxSearchResultRows: 128", panel)
+        self.assertIn("maxSearchPages: 2", panel)
+        self.assertIn("maxSearchQueryBytes: 1024", panel)
+        self.assertNotIn("Object.keys(treeCache)", panel)
+
+    def test_stage5_navigation_has_no_scanner_or_filesystem_fallback(self):
+        panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
+        start = panel.index("function selectTreePath")
+        end = panel.index("function retryNode")
+        navigation = panel[start:end]
+        self.assertNotIn("requestScan", navigation)
+        self.assertNotIn("helperPath", navigation)
+        self.assertNotIn("scanProcess", navigation)
+        self.assertNotIn("scandir", navigation)
+        self.assertIn('sendBrokerRequest("children"', navigation)
+        self.assertIn('sendBrokerRequest("ancestors"', navigation)
+        self.assertIn("BrowserState.previousPage", navigation)
+
+    def test_generation_swap_releases_old_frontend_state_reference(self):
+        panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
+        commit = panel.split("function commitInitialView()", 1)[1].split(
+            "function launchPendingScan()", 1
+        )[0]
+        self.assertIn("var nextState = BrowserState.create", commit)
+        self.assertEqual(commit.count("browserState = nextState"), 1)
+        self.assertNotIn("oldState", commit)
+        self.assertNotIn("previousState", commit)
+
+    def test_actual_qml_bounded_search_state_offscreen(self):
+        output = self.run_quickshell_fixture(
+            "SearchStateHarness.qml", "OMATREE_SEARCH_STATE_PASS", timeout=60
+        )
+        self.assertRegex(output, r"rows=0 pages=0 sessions=1 match500kMs=\d+")
+
+    def test_stage6_direct_reveal_and_static_architecture(self):
+        panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
+        search = (REPOSITORY / "SearchState.js").read_text(encoding="utf-8")
+        self.assertIn('sendBrokerRequest("childrenAt"', panel)
+        self.assertIn('sendBrokerRequest("ancestors"', panel)
+        self.assertNotIn('helperPath, "scan"', panel)
+        self.assertNotIn("Object.keys(treeCache)", panel)
+        self.assertNotIn("fetchall", panel)
+        self.assertIn("state.pages.length >= state.limits.maxPages", search)
+        self.assertIn("rows.length > state.limits.pageRows", search)
+        handler = panel.split("function handleBrokerLine(rawLine)", 1)[1].split(
+            "function requestActivationCommit()", 1
+        )[0]
+        self.assertIn("message.requestId !== searchRequestId", handler)
+        self.assertIn("message.generationId !== activeGenerationId", handler)
+        self.assertIn("expected.activationToken !== searchState.sessionId", handler)
+        schedule = panel.split("function scheduleSearch()", 1)[1].split(
+            "function chooseSearchResult", 1
+        )[0]
+        self.assertLess(schedule.index("clearSearchState(false)"),
+                        schedule.index("searchDebounce.restart()"))
 
 
 if __name__ == "__main__":

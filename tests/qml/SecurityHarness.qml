@@ -26,6 +26,23 @@ ShellRoot {
   }
 
   function testLimits() {
+    if (!require(FrontendSafety.brokerQueueLimitError(1048576, 0, 0, 1048576, 256, 4194304) === "", "broker exact line bytes")) return false
+    if (!require(FrontendSafety.brokerQueueLimitError(1048577, 0, 0, 1048576, 256, 4194304) !== "", "broker oversized line")) return false
+    if (!require(FrontendSafety.brokerQueueLimitError(1, 255, 0, 1048576, 256, 4194304) === "", "broker exact line count")) return false
+    if (!require(FrontendSafety.brokerQueueLimitError(1, 256, 0, 1048576, 256, 4194304) !== "", "broker line overflow")) return false
+    if (!require(FrontendSafety.brokerQueueLimitError(1, 0, 4194303, 1048576, 256, 4194304) === "", "broker exact queue bytes")) return false
+    if (!require(FrontendSafety.brokerQueueLimitError(2, 0, 4194303, 1048576, 256, 4194304) !== "", "broker queue overflow")) return false
+    var envelope = { protocolVersion: 1, requestId: "request", generationId: "generation" }
+    if (!require(FrontendSafety.brokerEnvelopeError(envelope, 1, 128, 128) === "", "broker envelope")) return false
+    envelope.protocolVersion = 2
+    if (!require(FrontendSafety.brokerEnvelopeError(envelope, 1, 128, 128) !== "", "broker protocol version")) return false
+    var brokerRow = { path: "/root/child", parent_path: "/root", name: "child",
+      allocated_bytes: 10, direct_files_bytes: 4, child_count: 0, warning_count: 0 }
+    if (!require(FrontendSafety.brokerDirectoryRowError(brokerRow, 4096) === "", "broker row")) return false
+    brokerRow.path = "/" + "x".repeat(4096)
+    if (!require(FrontendSafety.brokerDirectoryRowError(brokerRow, 4096) !== "", "broker long path")) return false
+    brokerRow.path = "/root/child"; brokerRow.allocated_bytes = NaN
+    if (!require(FrontendSafety.brokerDirectoryRowError(brokerRow, 4096) !== "", "broker numeric accounting")) return false
     if (!require(FrontendSafety.queueLimitError(65536, 0, 0, 65536, 4096, 16777216) === "", "exact line bytes")) return false
     if (!require(FrontendSafety.queueLimitError(65537, 0, 0, 65536, 4096, 16777216) !== "", "oversized line")) return false
     if (!require(FrontendSafety.queueLimitError(1, 4095, 0, 65536, 4096, 16777216) === "", "exact line count")) return false

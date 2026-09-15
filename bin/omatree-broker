@@ -1,0 +1,24 @@
+#!/usr/bin/python3
+"""Repository-local launcher for the OmaTree snapshot broker."""
+
+from pathlib import Path
+import sys
+
+
+REPOSITORY = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPOSITORY / "helper"))
+
+from omatree_core.broker import install_parent_death_signal, serve
+
+
+def main() -> int:
+    install_parent_death_signal()
+    try:
+        return serve(sys.stdin.buffer, sys.stdout.buffer)
+    except BaseException:
+        sys.stderr.write("OmaTree broker terminated after an internal failure\n")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -16,6 +16,51 @@ function queueLimitError(lineBytes, queuedLines, queuedBytes,
   return ""
 }
 
+function brokerQueueLimitError(lineBytes, queuedLines, queuedBytes,
+                               maxLineBytes, maxLines, maxBytes) {
+  if (lineBytes > maxLineBytes)
+    return "Snapshot backend response exceeded its line limit."
+  if (queuedLines >= maxLines)
+    return "Snapshot backend parser queue exceeded its line limit."
+  if (queuedBytes + lineBytes > maxBytes)
+    return "Snapshot backend parser queue exceeded its byte limit."
+  return ""
+}
+
+function brokerEnvelopeError(message, protocolVersion,
+                             maxRequestIdBytes, maxGenerationIdBytes) {
+  if (!message || message.protocolVersion !== protocolVersion)
+    return "Unsupported snapshot backend protocol."
+  if (typeof message.requestId !== "string" || message.requestId === ""
+      || utf8Bytes(message.requestId, maxRequestIdBytes + 1) > maxRequestIdBytes)
+    return "Invalid snapshot backend request identity."
+  if (message.generationId !== undefined
+      && (typeof message.generationId !== "string"
+          || utf8Bytes(message.generationId, maxGenerationIdBytes + 1)
+            > maxGenerationIdBytes))
+    return "Invalid snapshot backend generation identity."
+  return ""
+}
+
+function brokerDirectoryRowError(row, maxPathBytes) {
+  if (!row || typeof row.path !== "string" || row.path === ""
+      || typeof row.name !== "string" || row.name === ""
+      || (row.parent_path !== null && typeof row.parent_path !== "string")
+      || utf8Bytes(row.path, maxPathBytes + 1) > maxPathBytes
+      || utf8Bytes(row.name, maxPathBytes + 1) > maxPathBytes
+      || (row.parent_path !== null
+          && utf8Bytes(row.parent_path, maxPathBytes + 1) > maxPathBytes))
+    return "Invalid or oversized snapshot directory identity."
+  var fields = ["allocated_bytes", "direct_files_bytes", "child_count", "warning_count"]
+  for (var index = 0; index < fields.length; index++) {
+    var value = row[fields[index]]
+    if (typeof value !== "number" || !isFinite(value)
+        || value < 0 || Math.floor(value) !== value)
+      return "Invalid snapshot directory accounting."
+  }
+  return ""
+}
+
 function outputLimitExceeded(chunkBytes, retainedBytes, maxBytes) {
   return chunkBytes > maxBytes || retainedBytes + chunkBytes > maxBytes
 }
