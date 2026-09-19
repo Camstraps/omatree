@@ -50,13 +50,15 @@ function brokerDirectoryRowError(row, maxPathBytes) {
       || utf8Bytes(row.name, maxPathBytes + 1) > maxPathBytes
       || (row.parent_path !== null
           && utf8Bytes(row.parent_path, maxPathBytes + 1) > maxPathBytes))
-    return "Invalid or oversized snapshot directory identity."
+    return "Invalid or oversized snapshot item identity."
+  if (row.kind !== undefined && row.kind !== "directory" && row.kind !== "file")
+    return "Invalid snapshot item type."
   var fields = ["allocated_bytes", "direct_files_bytes", "child_count", "warning_count"]
   for (var index = 0; index < fields.length; index++) {
     var value = row[fields[index]]
     if (typeof value !== "number" || !isFinite(value)
         || value < 0 || Math.floor(value) !== value)
-      return "Invalid snapshot directory accounting."
+      return "Invalid snapshot item accounting."
   }
   return ""
 }

@@ -20,6 +20,7 @@ from omatree_core.sqlite_snapshot import (
     SQLiteSnapshotWriter,
     ensure_snapshot_runtime_dir,
 )
+from omatree_core.persistent_snapshots import ensure_snapshot_cache_dir
 
 
 def record(path, parent, name=None, bytes_=0, direct=0, children=0, warnings=0):
@@ -78,6 +79,27 @@ class SQLiteSnapshotTests(unittest.TestCase):
             snapshot.delete()
         self.assertFalse(snapshot.path.exists())
 
+    def test_file_rows_preserve_accounting_and_validate_parent(self):
+        writer = self.writer()
+        writer.insert_file({"path": "/root/file", "parentPath": "/root",
+                            "name": "file", "bytes": 4096})
+        root = record("/root", None, "root", 8192, 4096)
+        root["fileCount"] = 1
+        writer.insert_directory(root)
+        snapshot = writer.finalize("/root", 1)
+        with sqlite3.connect(snapshot.path) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT path,parent_path,name,allocated_bytes FROM files"
+            ).fetchall(), [("/root/file", "/root", "file", 4096)])
+        self.assertEqual(snapshot.file_count, 1)
+
+        writer = self.writer()
+        writer.insert_file({"path": "/missing/file", "parentPath": "/missing",
+                            "name": "file", "bytes": 1})
+        writer.insert_directory(record("/root", None))
+        with self.assertRaisesRegex(SQLiteSnapshotValidationError, "file has no parent"):
+            writer.finalize("/root", 1)
+
     def test_duplicate_path_rejects_and_deletes_staging_database(self):
         writer = self.writer()
         path = writer.path
@@ -85,6 +107,16 @@ class SQLiteSnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(SQLiteSnapshotError, "duplicate"):
             writer.insert_directory(record("/root", None))
         self.assertFalse(path.exists())
+
+    def test_persistent_cache_is_private_and_rejects_symlink_target(self):
+        cache = ensure_snapshot_cache_dir(self.runtime / "cache")
+        self.assertEqual(cache.stat().st_mode & 0o777, 0o700)
+        real = self.runtime / "real"
+        real.mkdir(mode=0o700)
+        link = self.runtime / "linked-cache"
+        link.symlink_to(real, target_is_directory=True)
+        with self.assertRaisesRegex(SQLiteSnapshotError, "unsafe|symlink"):
+            ensure_snapshot_cache_dir(link)
 
     def assert_validation_failure(self, records, root, count, message):
         writer = self.writer()

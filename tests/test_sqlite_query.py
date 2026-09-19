@@ -58,6 +58,16 @@ class SQLiteQueryTests(unittest.TestCase):
         self.snapshots.append(snapshot)
         return snapshot
 
+    def snapshot_with_files(self, records, files, root="/root"):
+        writer = SQLiteSnapshotWriter.create(self.runtime)
+        for item in files:
+            writer.insert_file(item)
+        for item in records:
+            writer.insert_directory(item)
+        snapshot = writer.finalize(root, len(records))
+        self.snapshots.append(snapshot)
+        return snapshot
+
     def basic_snapshot(self):
         return self.snapshot([
             record("/root/b", "/root", "beta", 20, 12, warnings=1),
@@ -114,6 +124,29 @@ class SQLiteQueryTests(unittest.TestCase):
             self.assertIsNone(second.continuation)
             self.assertEqual(reader.children("/root/c").rows, ())
             self.assertEqual(reader.children("/missing").rows, ())
+
+    def test_children_page_directories_before_files_and_remain_bounded(self):
+        files = [{"path": f"/root/f{i:04d}", "parentPath": "/root",
+                  "name": f"f{i:04d}", "bytes": 10000 - i} for i in range(1000)]
+        root_record = record("/root", None, children=1)
+        root_record["fileCount"] = 1000
+        snapshot = self.snapshot_with_files([
+            record("/root/d", "/root", "d", 1), root_record,
+        ], files)
+        with SQLiteSnapshotReader.open(snapshot.path) as reader:
+            first = reader.children("/root")
+            self.assertEqual(reader.metadata("/root").child_count, 1001)
+            self.assertEqual(first.rows[0].kind, "directory")
+            self.assertTrue(all(row.kind == "file" for row in first.rows[1:]))
+            self.assertLessEqual(len(first.rows), 64)
+            visited = len(first.rows)
+            token = first.continuation
+            while token:
+                page = reader.children("/root", token)
+                self.assertLessEqual(len(page.rows), 64)
+                visited += len(page.rows)
+                token = page.continuation
+            self.assertEqual(visited, 1001)
 
     def test_children_at_reveals_late_sibling_without_offset_or_prior_pages(self):
         count = 10_000

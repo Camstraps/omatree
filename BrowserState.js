@@ -127,7 +127,8 @@ function validateBatch(state, rows, validateRow) {
     if (old && (old.parent_path !== row.parent_path || old.name !== row.name
         || old.allocated_bytes !== row.allocated_bytes
         || old.direct_files_bytes !== row.direct_files_bytes
-        || old.child_count !== row.child_count || old.warning_count !== row.warning_count))
+        || old.child_count !== row.child_count || old.warning_count !== row.warning_count
+        || old.kind !== (row.kind || "directory")))
       return "conflicting directory row"
   }
   return ""
@@ -148,6 +149,7 @@ function insertRows(state, rows, validateRow) {
         allocated_bytes: source.allocated_bytes,
         direct_files_bytes: source.direct_files_bytes,
         child_count: source.child_count, warning_count: source.warning_count,
+        kind: source.kind || "directory",
         used: 0
       }
       state.rows[row.path] = row

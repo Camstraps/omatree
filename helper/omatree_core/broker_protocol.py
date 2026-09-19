@@ -19,7 +19,7 @@ MAX_GENERATION_ID_BYTES = 128
 MAX_CONTINUATION_BYTES = 32 * 1024
 
 OPERATIONS = frozenset({
-    "hello", "scanStart", "scanCancel", "metadata", "children",
+    "hello", "snapshotOpen", "scanStart", "scanCancel", "metadata", "children",
     "ancestors", "search", "childrenAt", "activationCommit", "activationAbort", "shutdown",
 })
 QUERY_OPERATIONS = frozenset({"metadata", "children", "childrenAt", "ancestors", "search"})

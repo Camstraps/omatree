@@ -115,12 +115,14 @@ def scan_tree(
     cancellation: Cancellation,
     emit_directory: Callable[[dict[str, Any]], None],
     limits: ResourceLimits = DEFAULT_LIMITS,
+    emit_file: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Scan once and emit finalized directory aggregates in post-order."""
     root = canonical_path(path)
     exclusions = {canonical_path(item) for item in excluded_mounts}
     seen_hardlinks: set[tuple[int, int]] = set()
     directory_count = 0
+    file_count = 0
     discovered_directory_count = 1
     reporter.limits = limits
     check_path(root, limits)
@@ -162,6 +164,7 @@ def scan_tree(
             "bytes": directory_bytes,
             "directFilesBytes": 0,
             "childDirectoryCount": 0,
+            "fileCount": 0,
             "warningStart": warning_start,
         }
 
@@ -205,6 +208,7 @@ def scan_tree(
                     "bytes": frame["bytes"],
                     "directFilesBytes": frame["directFilesBytes"],
                     "childDirectoryCount": frame["childDirectoryCount"],
+                    "fileCount": frame["fileCount"],
                     "warningCount": reporter.warning_count - frame["warningStart"],
                 }
                 emit_directory(record)
@@ -218,6 +222,7 @@ def scan_tree(
                         "bytes": record["bytes"],
                         "directFilesBytes": record["directFilesBytes"],
                         "directoryCount": directory_count,
+                        "fileCount": file_count,
                     }
                 continue
 
@@ -247,6 +252,15 @@ def scan_tree(
                 value = count_stat(stats)
                 frame["bytes"] += value
                 frame["directFilesBytes"] += value
+                if emit_file is not None and stat.S_ISREG(stats.st_mode):
+                    emit_file({
+                        "path": entry_path,
+                        "parentPath": frame["path"],
+                        "name": entry.name,
+                        "bytes": value,
+                    })
+                    file_count += 1
+                    frame["fileCount"] += 1
     finally:
         for frame in stack:
             iterator = frame["iterator"]

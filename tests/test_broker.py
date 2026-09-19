@@ -126,6 +126,9 @@ class BrokerTests(unittest.TestCase):
         self.counter += 1
         return f"{prefix}{self.counter}"
 
+    def databases(self):
+        return list(self.broker._snapshot_store().root.glob("*.sqlite"))
+
     def start(self, root, request_id=None):
         self.scanner.started.clear()
         scan_request_id = request_id or self.next_id("scan")
@@ -192,6 +195,42 @@ class BrokerTests(unittest.TestCase):
         self.assertEqual(revealed["result"]["kind"], "childrenAt")
         self.assertEqual(revealed["result"]["rows"][0]["path"], str(self.root_a / "child"))
 
+    def test_completed_snapshot_reopens_without_rescanning(self):
+        generation = self.activate()
+        self.commit_activation(generation)
+        self.broker.shutdown("restart")
+        calls = self.scanner.calls
+
+        output = BoundedOutputWriter(io.BytesIO())
+        restarted = SnapshotBroker(
+            output, runtime_dir=self.runtime, scan_function=self.scanner,
+            exclusion_provider=lambda _mount: set(),
+        )
+        try:
+            restarted.handle(request("open1", "snapshotOpen", path=str(self.root_a),
+                                     mountpoint=str(self.root_a)))
+            messages = [json.loads(line) for line in output._stream.getvalue().splitlines()]
+            available = messages[-1]
+            self.assertEqual(available["type"], "snapshotAvailable")
+            self.assertEqual(available["directoryCount"], 2)
+            self.assertEqual(self.scanner.calls, calls)
+            self.assertEqual(restarted.active_generation_id, available["generationId"])
+        finally:
+            restarted.shutdown("done")
+
+    def test_missing_corrupt_and_mount_separated_snapshots_fail_safely(self):
+        self.broker.handle(request("missing", "snapshotOpen", path=str(self.root_a),
+                                   mountpoint=str(self.root_a)))
+        self.assertEqual(self.messages()[-1]["type"], "snapshotMissing")
+        generation = self.activate()
+        self.commit_activation(generation)
+        store = self.broker._snapshot_store()
+        loaded = store.load(str(self.root_a), str(self.root_a))
+        self.assertIsNotNone(loaded)
+        self.assertIsNone(store.load(str(self.root_a), str(self.root_b)))
+        loaded.path.write_bytes(b"not sqlite")
+        self.assertIsNone(store.load(str(self.root_a), str(self.root_a)))
+
     def test_a_remains_queryable_while_b_scans_and_b_is_not_queryable(self):
         active = self.activate()
         self.scanner.behavior[str(self.root_b)] = "slow"
@@ -207,16 +246,16 @@ class BrokerTests(unittest.TestCase):
 
     def test_successful_replacement_deletes_retired_database(self):
         self.activate()
-        old_path = next(self.broker.session_dir.glob("*.sqlite"))
+        old_path = self.databases()[0]
         staging = self.start(self.root_b)
         self.wait_active(staging)
         self.commit_activation(staging)
         self.assertFalse(old_path.exists())
-        self.assertEqual(len(list(self.broker.session_dir.glob("*.sqlite"))), 1)
+        self.assertEqual(len(self.databases()), 1)
 
     def test_activation_abort_restores_previous_generation(self):
         original = self.activate()
-        original_path = next(self.broker.session_dir.glob("*.sqlite"))
+        original_path = self.databases()[0]
         replacement = self.start(self.root_b)
         self.wait_active(replacement)
         self.broker.handle(request(
@@ -224,11 +263,11 @@ class BrokerTests(unittest.TestCase):
         ))
         self.assertEqual(self.broker.active_generation_id, original)
         self.assertTrue(original_path.exists())
-        self.assertEqual(len(list(self.broker.session_dir.glob("*.sqlite"))), 1)
+        self.assertEqual(len(self.databases()), 1)
 
     def test_retired_database_waits_for_inflight_query(self):
         self.activate()
-        old_path = next(self.broker.session_dir.glob("*.sqlite"))
+        old_path = self.databases()[0]
         entered = threading.Event()
         release = threading.Event()
         original = SQLiteSnapshotReader.metadata
@@ -255,13 +294,13 @@ class BrokerTests(unittest.TestCase):
 
     def test_failed_b_preserves_a_and_removes_staging(self):
         active = self.activate()
-        active_path = next(self.broker.session_dir.glob("*.sqlite"))
+        active_path = self.databases()[0]
         self.scanner.behavior[str(self.root_b)] = "fail"
         self.start(self.root_b)
         self.assertTrue(self.broker.wait_for_idle())
         self.assertEqual(self.broker.active_generation_id, active)
         self.assertTrue(active_path.exists())
-        self.assertEqual(len(list(self.broker.session_dir.glob("*.sqlite"))), 1)
+        self.assertEqual(len(self.databases()), 1)
         self.assertEqual(self.query("metadata", path=str(self.root_a))["type"], "queryResult")
 
     def test_cancelled_b_preserves_a_and_duplicate_cancel_is_idempotent(self):
@@ -316,7 +355,7 @@ class BrokerTests(unittest.TestCase):
             release.set()
             self.assertTrue(self.broker.wait_for_idle())
         self.assertIsNone(self.broker.active_generation_id)
-        self.assertEqual(list(self.broker.session_dir.glob("*.sqlite")), [])
+        self.assertEqual(self.databases(), [])
         self.assertFalse(any(
             message["type"] == "snapshotActivated"
             for message in self.messages()
@@ -355,7 +394,7 @@ class BrokerTests(unittest.TestCase):
 
     def test_malformed_active_database_fails_safely_without_traceback(self):
         self.activate()
-        database = next(self.broker.session_dir.glob("*.sqlite"))
+        database = self.databases()[0]
         connection = sqlite3.connect(database)
         connection.execute(
             "UPDATE directories SET allocated_bytes = 'bad' WHERE parent_path IS NOT NULL"
@@ -482,7 +521,7 @@ class BrokerTests(unittest.TestCase):
         generation_e = self.start(self.root_c)
         self.wait_active(generation_e)
         self.commit_activation(generation_e)
-        self.assertEqual(len(list(self.broker.session_dir.glob("*.sqlite"))), 1)
+        self.assertEqual(len(self.databases()), 1)
         self.assertEqual(self.scanner.peak_active, 1)
         self.assertLessEqual(self.broker.high_water.outstanding_requests, 4)
         self.assertLessEqual(self.broker.high_water.scan_workers, 1)
@@ -497,13 +536,13 @@ class BrokerTests(unittest.TestCase):
         self.scanner.behavior[str(self.root_b)] = "slow"
         staging = self.start(self.root_b)
         self.assertTrue(self.scanner.started.wait(1))
-        self.assertEqual(len(list(self.broker.session_dir.glob("*.sqlite"))), 2)
+        self.assertEqual(len(self.databases()), 2)
         self.assertEqual(self.broker.staging_generation_id, staging)
         self.scanner.release.set()
         self.wait_active(staging)
-        self.assertEqual(len(list(self.broker.session_dir.glob("*.sqlite"))), 2)
+        self.assertEqual(len(self.databases()), 2)
         self.commit_activation(staging)
-        self.assertEqual(len(list(self.broker.session_dir.glob("*.sqlite"))), 1)
+        self.assertEqual(len(self.databases()), 1)
 
     def test_broker_source_never_builds_snapshotbuilder_tree(self):
         source = (REPOSITORY / "helper/omatree_core/broker.py").read_text()

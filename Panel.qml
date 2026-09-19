@@ -58,11 +58,14 @@ Item {
   property bool breadcrumbRequestRunning: false
   property var activeScanWarnings: []
   property var pendingScan: null
+  property var pendingSnapshotOpen: null
   property int progressEntries: 0
   property double progressBytes: 0
   property double scanStartedAt: 0
   property double scanElapsedSeconds: 0
   property int snapshotDirectoryCount: 0
+  property int snapshotFileCount: 0
+  property double snapshotCreatedAtMs: 0
   property double snapshotDurationMs: 0
   property string snapshotState: "idle"
   property string searchQuery: ""
@@ -295,6 +298,14 @@ Item {
     opened = true
     startBroker()
     if (filesystemModel.count === 0) launchDiscovery()
+    else if (selectedFilesystem) {
+      pendingSnapshotOpen = { path: selectedFilesystem.mountpoint,
+        mountpoint: selectedFilesystem.mountpoint, generation: treeGeneration }
+      if (brokerReady) {
+        pendingSnapshotOpen = null
+        requestSnapshotOpen(selectedFilesystem.mountpoint)
+      }
+    }
     Qt.callLater(function() { if (opened) keyCatcher.forceActiveFocus() })
   }
 
@@ -358,6 +369,8 @@ Item {
     searchSessionsRetained = 0
     revealState = null
     snapshotDirectoryCount = 0
+    snapshotFileCount = 0
+    snapshotCreatedAtMs = 0
     snapshotDurationMs = 0
     snapshotState = "idle"
   }
@@ -390,7 +403,6 @@ Item {
     }
     var mountpoint = filesystemModel.get(index).mountpoint
     if (selectedFilesystemIndex === index && treeRootPath === mountpoint) {
-      requestScan(mountpoint)
       return
     }
     treeGeneration++
@@ -399,7 +411,26 @@ Item {
     selectedFilesystemIndex = index
     preferredMountpoint = mountpoint
     treeRootPath = mountpoint
-    requestScan(mountpoint)
+    requestSnapshotOpen(mountpoint)
+  }
+
+  function requestSnapshotOpen(path) {
+    var filesystem = selectedFilesystem
+    if (!filesystem || path !== treeRootPath) return
+    var request = { path: path, mountpoint: filesystem.mountpoint, generation: treeGeneration }
+    if (!brokerReady) { pendingSnapshotOpen = request; startBroker(); return }
+    sendBrokerRequest("snapshotOpen", { path: path, mountpoint: filesystem.mountpoint },
+                      5000, "", "")
+    snapshotState = "loading"
+  }
+
+  function snapshotAgeText() {
+    if (snapshotCreatedAtMs <= 0) return ""
+    var seconds = Math.max(0, Math.floor((Date.now() - snapshotCreatedAtMs) / 1000))
+    if (seconds < 60) return "just now"
+    if (seconds < 3600) return Math.floor(seconds / 60) + "m ago"
+    if (seconds < 86400) return Math.floor(seconds / 3600) + "h ago"
+    return Math.floor(seconds / 86400) + "d ago"
   }
 
   function selectTreePath(path, reveal) {
@@ -525,7 +556,7 @@ Item {
         warningCount: row.warning_count,
         warningText: row.warning_count > 0 ? String(row.warning_count) + " paths could not be read" : "",
         errorText: "", hasChildren: row.child_count > 0, percentParent: 0,
-        contextPath: row.path, searchResult: true })
+        contextPath: row.path, searchResult: true, nodeKind: row.kind || "directory" })
       if (row.path === preferredPath) selectedTreeIndex = i
     }
     if (selectedTreeIndex < 0 && treeRows.count > 0) selectedTreeIndex = 0
@@ -579,6 +610,8 @@ Item {
   function toggleNode(path) {
     selectTreePath(path, false)
     if (!browserState || !activeBackendAvailable) return
+    var selected = rowForPath(path)
+    if (!selected || selected.kind === "file") return
     if (browserState.expansions[path]) {
       BrowserState.collapse(browserState, path)
       rebuildVisibleWindow(path)
@@ -647,7 +680,7 @@ Item {
       errorText: "", hasChildren: row.child_count > 0,
       percentParent: parentBytes > 0
         ? TreeModel.clampPercent(row.allocated_bytes * 100 / parentBytes) : 0,
-      contextPath: row.path, searchResult: false
+      contextPath: row.path, searchResult: false, nodeKind: row.kind || "directory"
     })
   }
 
@@ -703,7 +736,8 @@ Item {
 
   function requestBreadcrumb(path) {
     if (!browserState || !activeBackendAvailable || !path) return
-    breadcrumbTarget = path
+    var item = rowForPath(path)
+    breadcrumbTarget = item && item.kind === "file" ? item.parent_path : path
     breadcrumbDebounce.restart()
   }
 
@@ -901,9 +935,41 @@ Item {
       finishBrokerRequest(message.requestId)
       brokerHandshakeTimer.stop()
       brokerReady = true
+      var opening = pendingSnapshotOpen
+      pendingSnapshotOpen = null
+      if (opening) Qt.callLater(function() { requestSnapshotOpen(opening.path) })
       var waiting = pendingScan
       pendingScan = null
       if (waiting) Qt.callLater(function() { launchScan(waiting) })
+      return
+    }
+    if (expected.operation === "snapshotOpen") {
+      finishBrokerRequest(message.requestId)
+      if (message.type === "snapshotMissing") {
+        requestScan(treeRootPath)
+        return
+      }
+      if (message.type !== "snapshotAvailable") {
+        requestScan(treeRootPath)
+        return
+      }
+      if (message.fileCount === undefined) message.fileCount = 0
+      if (message.createdAtMs === undefined) message.createdAtMs = Date.now()
+      if (!validNumber(message.bytes) || !validNumber(message.directFilesBytes)
+          || !validNumber(message.entries) || !validNumber(message.directoryCount)
+          || !validNumber(message.fileCount) || !validNumber(message.warningCount)
+          || !validNumber(message.durationMs) || !validNumber(message.createdAtMs)
+          || !validIdentifier(message.generationId, maxGenerationIdBytes)) {
+        requestScan(treeRootPath)
+        return
+      }
+      var openToken = nextBrokerRequestId()
+      pendingActivation = { token: openToken, generationId: message.generationId,
+        path: message.path, summary: message, metadata: null, children: null }
+      sendBrokerRequest("metadata", { generationId: message.generationId,
+        path: message.path }, 3000, message.generationId, openToken)
+      sendBrokerRequest("children", { generationId: message.generationId,
+        path: message.path }, 3000, message.generationId, openToken)
       return
     }
     if (message.type === "scanStarted" && expected.operation === "scanStart") {
@@ -948,9 +1014,12 @@ Item {
         return
       }
       if (message.type === "snapshotActivated") {
+        if (message.fileCount === undefined) message.fileCount = 0
+        if (message.createdAtMs === undefined) message.createdAtMs = Date.now()
         if (!validNumber(message.bytes) || !validNumber(message.directFilesBytes)
             || !validNumber(message.entries) || !validNumber(message.directoryCount)
-            || !validNumber(message.warningCount) || !validNumber(message.durationMs)
+            || !validNumber(message.fileCount) || !validNumber(message.warningCount)
+            || !validNumber(message.durationMs) || !validNumber(message.createdAtMs)
             || typeof message.path !== "string"
             || FrontendSafety.utf8Bytes(message.path, maxPathBytes + 1) > maxPathBytes) {
           failBroker("Snapshot activation metadata is invalid.")
@@ -1275,6 +1344,8 @@ Item {
     updateGenerationHighWater()
     treeRootPath = metadata.path
     snapshotDirectoryCount = activation.summary.directoryCount
+    snapshotFileCount = activation.summary.fileCount
+    snapshotCreatedAtMs = activation.summary.createdAtMs
     snapshotDurationMs = activation.summary.durationMs
     snapshotState = "complete"
     selectedTreePath = nextState.selection
@@ -1522,7 +1593,8 @@ Item {
         RowLayout {
           Layout.fillWidth: true
           Text { Layout.fillWidth: true; text: "OmaTree"; color: Color.popups.text; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true }
-          Button { text: root.discoveryLoading ? "Refreshing…" : "Refresh"; enabled: !root.discoveryLoading; focusable: true; foreground: Color.popups.text; onClicked: root.refresh() }
+          Button { text: root.discoveryLoading ? "Refreshing…" : "Refresh disks"; enabled: !root.discoveryLoading; focusable: true; foreground: Color.popups.text; onClicked: root.refresh() }
+          Button { text: root.scanning ? "Rescanning…" : "Rescan"; enabled: !!root.selectedFilesystem && !root.scanning; focusable: true; foreground: Color.popups.text; onClicked: root.requestScan(root.treeRootPath) }
           Button { text: "Close"; focusable: true; foreground: Color.popups.text; onClicked: root.dismiss() }
         }
         Rectangle { Layout.fillWidth: true; height: 1; color: Color.popups.border; opacity: 0.35 }
@@ -1650,8 +1722,8 @@ Item {
 
             RowLayout {
               Layout.fillWidth: true
-              visible: !root.scanning && root.snapshotState === "complete"
-              Text { Layout.fillWidth: true; text: "Snapshot: " + root.snapshotDirectoryCount.toLocaleString() + " directories · " + (root.snapshotDurationMs / 1000).toFixed(1) + " s"; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
+              visible: root.activeGenerationId !== ""
+              Text { Layout.fillWidth: true; text: "Snapshot: " + root.snapshotDirectoryCount.toLocaleString() + " directories · " + root.snapshotFileCount.toLocaleString() + " files · " + root.snapshotAgeText() + (root.scanning ? " · rescanning in background" : ""); color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
               Text { visible: root.actionFeedback !== ""; text: root.actionFeedback; color: Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
             }
 
@@ -1734,6 +1806,7 @@ Item {
                   required property double percentParent
                   required property string contextPath
                   required property bool searchResult
+                  required property string nodeKind
                   width: treeView.width
                   height: searchResult ? Style.space(48) : Style.space(34)
                   radius: Style.cornerRadius
@@ -1750,8 +1823,8 @@ Item {
                     spacing: Style.space(8)
                     Item {
                       visible: !searchResult; Layout.preferredWidth: Style.space(18); Layout.fillHeight: true; z: 3
-                      Text { anchors.centerIn: parent; text: loading ? "◌" : hasChildren ? (expanded ? "▾" : "▸") : ""; color: errorText !== "" ? Color.urgent : Color.popups.text; font.family: Style.font.family; font.pixelSize: Style.font.body }
-                      MouseArea { anchors.fill: parent; enabled: hasChildren; onClicked: function(mouse) { mouse.accepted = true; root.toggleNode(nodePath) } }
+                      Text { anchors.centerIn: parent; text: loading ? "◌" : nodeKind === "file" ? "·" : hasChildren ? (expanded ? "▾" : "▸") : "▹"; color: errorText !== "" ? Color.urgent : Color.popups.text; font.family: Style.font.family; font.pixelSize: Style.font.body }
+                      MouseArea { anchors.fill: parent; enabled: nodeKind === "directory"; onClicked: function(mouse) { mouse.accepted = true; root.toggleNode(nodePath) } }
                     }
                     ColumnLayout {
                       Layout.fillWidth: true; spacing: 0
@@ -1771,7 +1844,7 @@ Item {
                   text: root.discoveryError !== "" ? root.discoveryError
                     : root.searchRunning ? "Searching snapshot…"
                     : root.searchState && root.searchState.error !== "" ? root.searchState.error
-                    : root.searchQuery.trim() !== "" ? "No matching directories" : "No directory data"
+                    : root.searchQuery.trim() !== "" ? "No matching directories" : "No directory or file data"
                   color: root.discoveryError !== "" ? Color.urgent : Color.muted
                   font.family: Style.font.family; font.pixelSize: Style.font.body
                 }

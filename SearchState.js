@@ -27,7 +27,8 @@ function putPage(state, inputContinuation, rows, hasMore, continuation, validate
     var source = rows[j]
     copy.push({ path: source.path, parent_path: source.parent_path, name: source.name,
       allocated_bytes: source.allocated_bytes, direct_files_bytes: source.direct_files_bytes,
-      child_count: source.child_count, warning_count: source.warning_count })
+      child_count: source.child_count, warning_count: source.warning_count,
+      kind: source.kind || "directory" })
   }
   if (state.pages.length >= state.limits.maxPages) state.pages.shift()
   state.pages.push({ inputContinuation: inputContinuation || "", rows: copy,

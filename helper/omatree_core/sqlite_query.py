@@ -85,6 +85,7 @@ class DirectoryRow:
     direct_files_bytes: int
     child_count: int
     warning_count: int
+    kind: str = "directory"
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,12 +104,18 @@ _EXPECTED_COLUMNS = (
     ("allocated_bytes", "INTEGER"),
     ("direct_files_bytes", "INTEGER"),
     ("child_count", "INTEGER"),
+    ("file_count", "INTEGER"),
     ("warning_count", "INTEGER"),
     ("depth", "INTEGER"),
 )
 
+_EXPECTED_FILE_COLUMNS = (
+    ("path", "TEXT"), ("parent_path", "TEXT"), ("name", "TEXT"),
+    ("name_fold", "TEXT"), ("allocated_bytes", "INTEGER"),
+)
+
 _ROW_SELECT = """path, parent_path, name, allocated_bytes,
-                  direct_files_bytes, child_count, warning_count"""
+                  direct_files_bytes, (child_count + file_count), warning_count"""
 
 
 def _encoded_size(value: str) -> int:
@@ -206,6 +213,7 @@ class SQLiteSnapshotReader:
         self.snapshot_id = ""
         self.root_path = ""
         self.directory_count = 0
+        self.file_count = 0
         self._identity = (0, 0)
         self._mtime_ns = 0
         self._size = 0
@@ -325,10 +333,10 @@ class SQLiteSnapshotReader:
     def _validate_completed_snapshot(self) -> None:
         tables = self._bounded_rows(self._connection.execute("""
             SELECT name FROM sqlite_schema
-            WHERE type = 'table' AND name IN ('directories', 'snapshot_meta')
+            WHERE type = 'table' AND name IN ('directories', 'files', 'snapshot_meta')
             ORDER BY name
-        """), 2)
-        if [row[0] for row in tables] != ["directories", "snapshot_meta"]:
+        """), 3)
+        if [row[0] for row in tables] != ["directories", "files", "snapshot_meta"]:
             raise SnapshotCorruptionError("snapshot schema is invalid")
         columns = self._bounded_rows(
             self._connection.execute("PRAGMA table_info(directories)"), 16
@@ -336,6 +344,14 @@ class SQLiteSnapshotReader:
         actual = tuple((row[1], str(row[2]).upper()) for row in columns)
         if actual != _EXPECTED_COLUMNS or columns[0][5] != 1:
             raise SnapshotCorruptionError("snapshot directory schema is invalid")
+        file_columns = self._bounded_rows(
+            self._connection.execute("PRAGMA table_info(files)"), 8
+        )
+        if (
+            tuple((row[1], str(row[2]).upper()) for row in file_columns)
+            != _EXPECTED_FILE_COLUMNS or file_columns[0][5] != 1
+        ):
+            raise SnapshotCorruptionError("snapshot file schema is invalid")
         metadata_columns = self._bounded_rows(
             self._connection.execute("PRAGMA table_info(snapshot_meta)"), 4
         )
@@ -351,6 +367,10 @@ class SQLiteSnapshotReader:
             "directories_name_fold": (("name_fold", 0),),
             "directories_global_order": (
                 ("allocated_bytes", 1), ("name_fold", 0), ("path", 0),
+            ),
+            "files_parent_order": (
+                ("parent_path", 0), ("allocated_bytes", 1),
+                ("name_fold", 0), ("path", 0),
             ),
         }
         for index_name, expected in expected_indexes.items():
@@ -393,6 +413,16 @@ class SQLiteSnapshotReader:
         self.snapshot_id = snapshot_id
         self.root_path = root_path
         self.directory_count = count
+        file_count = self._metadata_value("file_count")
+        if (
+            isinstance(file_count, bool) or not isinstance(file_count, int)
+            or file_count < 0
+        ):
+            raise SnapshotCorruptionError("snapshot file count is invalid")
+        actual_files = self._connection.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        if actual_files != file_count:
+            raise SnapshotCorruptionError("snapshot file metadata is inconsistent")
+        self.file_count = file_count
 
     def _ensure_open_and_unchanged(self) -> None:
         if self._closed:
@@ -449,6 +479,21 @@ class SQLiteSnapshotReader:
         elif parent is None:
             raise SnapshotCorruptionError("directory has an unexpected null parent")
         return DirectoryRow(path, parent, name, allocated, direct, children, warnings)
+
+    def _file_row(self, raw: tuple[Any, ...]) -> DirectoryRow:
+        if len(raw) != 5:
+            raise SnapshotCorruptionError("file row shape is invalid")
+        path, parent, name, allocated, name_fold = raw
+        row = DirectoryRow(path, parent, name, allocated, 0, 0, 0, "file")
+        if any(not isinstance(value, str) or not value for value in (path, parent, name)):
+            raise SnapshotCorruptionError("file strings are malformed")
+        if any(_encoded_size(value) > self.query_limits.max_string_bytes for value in (path, parent, name)):
+            raise SnapshotCorruptionError("file string exceeds limit")
+        if isinstance(allocated, bool) or not isinstance(allocated, int) or allocated < 0:
+            raise SnapshotCorruptionError("file accounting is malformed")
+        if not isinstance(name_fold, str) or name_fold != name.casefold():
+            raise SnapshotCorruptionError("file folded name is malformed")
+        return row
 
     def metadata(self, path: str) -> DirectoryRow | None:
         self._ensure_open_and_unchanged()
@@ -550,48 +595,78 @@ class SQLiteSnapshotReader:
     ) -> QueryPage:
         self._ensure_open_and_unchanged()
         self._validate_input_path(parent_path)
-        key = self._parse_keyset(continuation, "children", parent_path)
-        self._validate_keyset_row(key, parent_path=parent_path)
+        key = None
+        if continuation is not None:
+            payload = _token_decode(continuation)
+            if (
+                payload.get("kind") != "children"
+                or payload.get("snapshot") != self.snapshot_id
+                or payload.get("scope") != parent_path
+            ):
+                raise InvalidContinuationToken("stale or mismatched continuation token")
+            raw_key = payload.get("key")
+            if payload.get("v") == 1 and isinstance(raw_key, list) and len(raw_key) == 3:
+                raw_key = [0] + raw_key
+            if (
+                not isinstance(raw_key, list) or len(raw_key) != 4
+                or raw_key[0] not in (0, 1) or isinstance(raw_key[1], bool)
+                or not isinstance(raw_key[1], int) or raw_key[1] < 0
+                or not isinstance(raw_key[2], str)
+                or not isinstance(raw_key[3], str)
+            ):
+                raise InvalidContinuationToken("continuation state is not in snapshot")
+            key = (raw_key[0], raw_key[1], raw_key[2], raw_key[3])
+            table = "directories" if key[0] == 0 else "files"
+            if self._fetchone(self._connection.execute(
+                f"SELECT 1 FROM {table} WHERE path=? AND parent_path=? AND allocated_bytes=? AND name_fold=?",
+                (key[3], parent_path, key[1], key[2]),
+            )) is None:
+                raise InvalidContinuationToken("continuation state is not in snapshot")
         parent = self.metadata(parent_path)
         if parent is None:
             return QueryPage("children", (), False, None)
-        if key is None:
-            cursor = self._connection.execute(f"""
-                SELECT {_ROW_SELECT}, name_fold
-                FROM directories
-                WHERE parent_path = ?
-                ORDER BY allocated_bytes DESC, name_fold, path
-                LIMIT ?
-            """, (parent_path, self.query_limits.max_rows + 1))
-        else:
-            cursor = self._connection.execute(f"""
-                SELECT * FROM (
-                    SELECT {_ROW_SELECT}, name_fold
-                    FROM directories
-                    WHERE parent_path = ? AND allocated_bytes < ?
-                    UNION ALL
-                    SELECT {_ROW_SELECT}, name_fold
-                    FROM directories
-                    WHERE parent_path = ? AND allocated_bytes = ?
-                      AND (name_fold, path) > (?, ?)
-                )
-                ORDER BY allocated_bytes DESC, name_fold, path
-                LIMIT ?
-            """, (
-                parent_path, key[0], parent_path, key[0], key[1], key[2],
-                self.query_limits.max_rows + 1,
-            ))
+        corrupt = self._fetchone(self._connection.execute("""
+            SELECT 1 FROM directories WHERE parent_path=? AND
+              (typeof(allocated_bytes) <> 'integer' OR allocated_bytes < 0)
+            UNION ALL
+            SELECT 1 FROM files WHERE parent_path=? AND
+              (typeof(allocated_bytes) <> 'integer' OR allocated_bytes < 0)
+            LIMIT 1
+        """, (parent_path, parent_path)))
+        if corrupt is not None:
+            raise SnapshotCorruptionError("child accounting is malformed")
+        token_group, token_bytes, token_fold, token_path = key or (0, 2**63 - 1, "", "")
+        cursor = self._connection.execute(f"""
+            SELECT * FROM (
+              SELECT 0 AS item_kind, {_ROW_SELECT}, name_fold FROM directories
+               WHERE parent_path = ? AND ? = 0 AND (allocated_bytes < ? OR
+                    (allocated_bytes = ? AND (name_fold, path) > (?, ?)))
+              UNION ALL
+              SELECT 1 AS item_kind, path,parent_path,name,allocated_bytes,0,0,0,name_fold
+                FROM files WHERE parent_path = ? AND (? < 1 OR
+                    (? = 1 AND (allocated_bytes < ? OR
+                    (allocated_bytes = ? AND (name_fold, path) > (?, ?)))))
+            ) ORDER BY item_kind, allocated_bytes DESC, name_fold, path LIMIT ?
+        """, (parent_path, token_group, token_bytes, token_bytes, token_fold, token_path,
+              parent_path, token_group, token_group, token_bytes, token_bytes,
+              token_fold, token_path, self.query_limits.max_rows + 1))
         raw_rows = self._fetchmany(cursor, self.query_limits.max_rows + 1)
         candidates = []
         for raw in raw_rows[:self.query_limits.max_rows]:
-            row = self._row(raw[:7])
-            name_fold = raw[7]
+            group = raw[0]
+            row = (
+                self._row(raw[1:8]) if group == 0
+                else self._file_row((raw[1], raw[2], raw[3], raw[4], raw[8]))
+            )
+            name_fold = raw[8]
             if not isinstance(name_fold, str) or name_fold != row.name.casefold():
                 raise SnapshotCorruptionError("directory search name is malformed")
-            candidates.append((row, (row.allocated_bytes, name_fold, row.path)))
+            candidates.append((row, (group, row.allocated_bytes, name_fold, row.path)))
+        def child_token(value: tuple[int, int, str, str]) -> str:
+            return _token_encode({"v": 2, "kind": "children", "snapshot": self.snapshot_id,
+                                  "scope": parent_path, "key": list(value)})
         return self._pack(
-            "children", candidates,
-            lambda value: self._keyset_token("children", parent_path, value),
+            "children", candidates, child_token,
             len(raw_rows) > self.query_limits.max_rows,
         )
 

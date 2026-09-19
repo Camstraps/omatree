@@ -40,6 +40,7 @@ class QmlScanPipelineTests(unittest.TestCase):
                 "QT_QPA_PLATFORMTHEME": "",
                 "QT_STYLE_OVERRIDE": "Fusion",
                 "XDG_RUNTIME_DIR": runtime,
+                "XDG_CACHE_HOME": str(Path(runtime) / "cache"),
                 "OMATREE_TEST_REPOSITORY": str(REPOSITORY),
             })
             if broker_tree:
@@ -154,7 +155,18 @@ class QmlScanPipelineTests(unittest.TestCase):
         selection = panel.split("function selectFilesystem(index)", 1)[1].split(
             "function rebuildTreeRows()", 1
         )[0]
-        self.assertEqual(selection.count("requestScan(mountpoint)"), 2)
+        self.assertIn("requestSnapshotOpen(mountpoint)", selection)
+        self.assertNotIn("requestScan(mountpoint)", selection)
+        self.assertIn('text: root.scanning ? "Rescanning…" : "Rescan"', panel)
+
+    def test_panel_uses_persistent_snapshot_open_and_typed_bounded_rows(self):
+        panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
+        browser = (REPOSITORY / "BrowserState.js").read_text(encoding="utf-8")
+        self.assertIn('sendBrokerRequest("snapshotOpen"', panel)
+        self.assertIn('nodeKind: row.kind || "directory"', panel)
+        self.assertIn('selected.kind === "file"', panel)
+        self.assertIn('kind: source.kind || "directory"', browser)
+        self.assertEqual(panel.count('sendBrokerRequest("scanStart"'), 1)
 
     def test_stale_generation_is_rejected_before_activation_staging(self):
         panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")

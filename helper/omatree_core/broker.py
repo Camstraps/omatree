@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import asdict, dataclass
 import json
+import inspect
 import os
 from pathlib import Path
 import secrets
@@ -49,6 +50,7 @@ from .sqlite_snapshot import (
     SQLiteSnapshotError, SQLiteSnapshotWriter,
     ensure_snapshot_runtime_dir,
 )
+from .persistent_snapshots import PersistentSnapshotStore
 
 
 SCAN_TIMEOUT_SECONDS = 60 * 60
@@ -75,6 +77,8 @@ class _Generation:
     snapshot: SQLiteSnapshot
     references: int = 0
     retired: bool = False
+    mountpoint: str = ""
+    persistent: bool = False
 
 
 @dataclass(slots=True)
@@ -167,6 +171,7 @@ class SnapshotBroker:
         scan_timeout: float = SCAN_TIMEOUT_SECONDS,
         query_timeout: float = QUERY_TIMEOUT_SECONDS,
         search_timeout: float = SEARCH_TIMEOUT_SECONDS,
+        cache_dir: str | os.PathLike[str] | None = None,
     ) -> None:
         self.output = output
         self.session_dir = create_broker_session(runtime_dir)
@@ -178,6 +183,10 @@ class SnapshotBroker:
         self.scan_timeout = scan_timeout
         self.query_timeout = query_timeout
         self.search_timeout = search_timeout
+        if cache_dir is None and runtime_dir is not None:
+            cache_dir = Path(runtime_dir) / "persistent-test-cache"
+        self._cache_dir = cache_dir
+        self.snapshot_store: PersistentSnapshotStore | None = None
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._active: _Generation | None = None
@@ -255,6 +264,7 @@ class SnapshotBroker:
                 self._emit("ready", request.request_id, capabilities={
                     "operations": sorted((
                         "scanStart", "scanCancel", "metadata", "children",
+                        "snapshotOpen",
                         "ancestors", "search", "childrenAt", "activationCommit",
                         "activationAbort", "shutdown",
                     )),
@@ -263,6 +273,8 @@ class SnapshotBroker:
                 })
             elif request.operation == "scanStart":
                 self._scan_start(request)
+            elif request.operation == "snapshotOpen":
+                self._snapshot_open(request)
             elif request.operation == "scanCancel":
                 self._scan_cancel(request)
             elif request.operation in QUERY_OPERATIONS:
@@ -347,6 +359,37 @@ class SnapshotBroker:
         timer.start()
         thread.start()
 
+    def _snapshot_open(self, request: BrokerRequest) -> None:
+        path = canonical_path(self._string(request, "path", self.resource_limits.max_path_bytes))
+        mountpoint = canonical_path(self._string(request, "mountpoint", self.resource_limits.max_path_bytes))
+        check_path(path, self.resource_limits)
+        check_path(mountpoint, self.resource_limits)
+        with self._lock:
+            if self._staging is not None or self._previous is not None:
+                raise BrokerProtocolError("snapshot activation is not settled")
+        snapshot = self._snapshot_store().load(path, mountpoint)
+        if snapshot is None:
+            self._emit("snapshotMissing", request.request_id, path=path, mountpoint=mountpoint)
+            return
+        with SQLiteSnapshotReader.open(snapshot.path) as reader:
+            summary = {
+                "bytes": reader._metadata_value("allocated_bytes"),
+                "directFilesBytes": reader._metadata_value("direct_files_bytes"),
+                "entries": reader._metadata_value("entries"),
+                "directoryCount": reader.directory_count,
+                "fileCount": reader.file_count,
+                "warningCount": reader._metadata_value("warning_count"),
+                "durationMs": reader._metadata_value("duration_ms"),
+                "createdAtMs": reader._metadata_value("created_at_ms"),
+            }
+        generation_id = secrets.token_hex(16)
+        with self._lock:
+            self._previous = self._active
+            self._active = _Generation(generation_id, snapshot, mountpoint=mountpoint,
+                                       persistent=True)
+        self._emit("snapshotAvailable", request.request_id, generationId=generation_id,
+                   path=path, **summary)
+
     def _scan_timed_out(self, state: _ScanState) -> None:
         with self._lock:
             if self._staging is state and not state.terminal_emitted:
@@ -420,15 +463,19 @@ class SnapshotBroker:
                 )
             state.cancellation.check()
             writer = SQLiteSnapshotWriter.create_in_directory(
-                self.session_dir,
+                self._snapshot_store().root,
                 resource_limits=self.resource_limits,
                 sqlite_limits=self.sqlite_limits,
             )
             state.writer = writer
-            summary = self.scan_function(
+            scan_arguments = (
                 path, exclusions, reporter, state.cancellation,
                 writer.insert_directory, self.resource_limits,
             )
+            if "emit_file" in inspect.signature(self.scan_function).parameters:
+                summary = self.scan_function(*scan_arguments, emit_file=writer.insert_file)
+            else:
+                summary = self.scan_function(*scan_arguments)
             state.cancellation.check()
             snapshot = writer.finalize(
                 path, summary["directoryCount"], {
@@ -437,11 +484,13 @@ class SnapshotBroker:
                     "direct_files_bytes": summary["directFilesBytes"],
                     "warning_count": reporter.warning_count,
                     "duration_ms": round((time.monotonic() - started) * 1000),
+                    "created_at_ms": round(time.time() * 1000),
+                    "mountpoint": mountpoint,
                 },
             )
             state.snapshot = snapshot
             state.cancellation.check()
-            self._activate(state, snapshot, summary, reporter, started)
+            self._activate(state, snapshot, summary, reporter, started, mountpoint)
             state.snapshot = None
             snapshot = None
         except ScanCancelled:
@@ -470,6 +519,7 @@ class SnapshotBroker:
         summary: Mapping[str, Any],
         reporter: ScanReporter,
         started: float,
+        mountpoint: str,
     ) -> None:
         with self._lock:
             if (
@@ -486,7 +536,7 @@ class SnapshotBroker:
             ):
                 pass
             self._previous = self._active
-            self._active = _Generation(state.generation_id, snapshot)
+            self._active = _Generation(state.generation_id, snapshot, mountpoint=mountpoint)
             self._staging = None
             state.terminal_emitted = True
             self._condition.notify_all()
@@ -501,9 +551,11 @@ class SnapshotBroker:
             directFilesBytes=summary["directFilesBytes"],
             entries=reporter.entries,
             directoryCount=summary["directoryCount"],
+            fileCount=summary.get("fileCount", snapshot.file_count),
             warningCount=reporter.warning_count,
             suppressedWarningCount=max(0, reporter.warning_count - MAX_WARNINGS),
             durationMs=round((time.monotonic() - started) * 1000),
+            createdAtMs=round(time.time() * 1000),
         )
 
     def _activation_commit(self, request: BrokerRequest) -> None:
@@ -512,6 +564,16 @@ class SnapshotBroker:
             if self._active is None or self._active.generation_id != generation_id:
                 raise BrokerProtocolError("generation is not awaiting activation")
             previous = self._previous
+            current = self._active
+        if current is not None and not current.persistent:
+            try:
+                current.snapshot = self._snapshot_store().publish(
+                    current.snapshot, current.mountpoint
+                )
+                current.persistent = True
+            except (OSError, SQLiteSnapshotError) as error:
+                raise BrokerProtocolError("could not persist completed snapshot") from error
+        with self._lock:
             self._previous = None
             if previous is not None:
                 previous.retired = True
@@ -521,6 +583,11 @@ class SnapshotBroker:
             "activationCommitted", request.request_id,
             generationId=generation_id,
         )
+
+    def _snapshot_store(self) -> PersistentSnapshotStore:
+        if self.snapshot_store is None:
+            self.snapshot_store = PersistentSnapshotStore(self._cache_dir)
+        return self.snapshot_store
 
     def _activation_abort(self, request: BrokerRequest) -> None:
         generation_id = self._generation_id(request, required=True)
@@ -533,7 +600,8 @@ class SnapshotBroker:
             self._previous = None
             restored = self._active.generation_id if self._active else ""
         if current.references == 0:
-            current.snapshot.delete()
+            if not current.persistent:
+                current.snapshot.delete()
         self._emit(
             "activationAborted", request.request_id,
             generationId=generation_id, activeGenerationId=restored,
@@ -678,7 +746,8 @@ class SnapshotBroker:
                 self._current_query = None
                 job.generation.references -= 1
                 if job.generation.retired and job.generation.references == 0:
-                    job.generation.snapshot.delete()
+                    if not job.generation.persistent:
+                        job.generation.snapshot.delete()
                 self._outstanding.pop(job.request.request_id, None)
                 self._condition.notify_all()
 
@@ -750,9 +819,11 @@ class SnapshotBroker:
             if previous is not None:
                 previous.retired = True
         if active is not None and active.references == 0:
-            active.snapshot.delete()
+            if not active.persistent:
+                active.snapshot.delete()
         if previous is not None and previous.references == 0:
-            previous.snapshot.delete()
+            if not previous.persistent:
+                previous.snapshot.delete()
         try:
             self.session_dir.rmdir()
         except OSError:

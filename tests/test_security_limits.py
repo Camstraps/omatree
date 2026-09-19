@@ -55,6 +55,25 @@ def scan(path, resource_limits):
 
 
 class ScannerResourceTests(unittest.TestCase):
+    def test_file_emission_preserves_hardlink_and_symlink_semantics(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            original = root / "data"
+            original.write_bytes(b"payload")
+            os.link(original, root / "hardlink")
+            os.symlink(original, root / "symlink")
+            reporter = scanner.ScanReporter("r", lambda _event: None, limits=limits())
+            directories, files = [], []
+            summary = scanner.scan_tree(
+                str(root), set(), reporter, scanner.Cancellation(),
+                directories.append, limits(), emit_file=files.append,
+            )
+            self.assertEqual(summary["fileCount"], 2)
+            self.assertEqual({item["name"] for item in files}, {"data", "hardlink"})
+            self.assertEqual(sum(item["bytes"] for item in files),
+                             os.stat(original).st_blocks * 512)
+            self.assertNotIn("symlink", {item["name"] for item in files})
+
     def test_directory_limit_accepts_exact_and_rejects_one_over(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

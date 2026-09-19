@@ -33,7 +33,7 @@ class SQLiteSnapshotLimits:
 
 
 DEFAULT_SQLITE_LIMITS = SQLiteSnapshotLimits()
-SQLITE_SNAPSHOT_SCHEMA_VERSION = 1
+SQLITE_SNAPSHOT_SCHEMA_VERSION = 2
 
 
 class SQLiteSnapshotError(RuntimeError):
@@ -125,6 +125,7 @@ class SQLiteSnapshot:
     directory_count: int
     root_path: str
     _identity: tuple[int, int]
+    file_count: int = 0
 
     def delete(self) -> None:
         _unlink_if_original(self.path, self._identity)
@@ -147,6 +148,7 @@ class SQLiteSnapshotWriter:
         self._resource_limits = resource_limits
         self._sqlite_limits = sqlite_limits
         self._directory_count = 0
+        self._file_count = 0
         self._closed = False
         self._completed = False
         self._snapshot_id = secrets.token_hex(16)
@@ -253,12 +255,20 @@ class SQLiteSnapshotWriter:
                 allocated_bytes INTEGER NOT NULL CHECK (allocated_bytes >= 0),
                 direct_files_bytes INTEGER NOT NULL CHECK (direct_files_bytes >= 0),
                 child_count INTEGER NOT NULL CHECK (child_count >= 0),
+                file_count INTEGER NOT NULL CHECK (file_count >= 0),
                 warning_count INTEGER NOT NULL CHECK (warning_count >= 0),
                 depth INTEGER CHECK (depth IS NULL OR depth >= 0)
             ) WITHOUT ROWID;
             CREATE TABLE snapshot_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            ) WITHOUT ROWID;
+            CREATE TABLE files (
+                path TEXT PRIMARY KEY,
+                parent_path TEXT NOT NULL,
+                name TEXT NOT NULL,
+                name_fold TEXT NOT NULL,
+                allocated_bytes INTEGER NOT NULL CHECK (allocated_bytes >= 0)
             ) WITHOUT ROWID;
         """)
 
@@ -318,13 +328,15 @@ class SQLiteSnapshotWriter:
                 self._integer(record, "bytes"),
                 self._integer(record, "directFilesBytes"),
                 self._integer(record, "childDirectoryCount"),
+                self._integer(record, "fileCount") if "fileCount" in record else 0,
                 self._integer(record, "warningCount"),
             )
             self._connection.execute(
                 """INSERT INTO directories (
                        path, parent_path, name, name_fold, allocated_bytes,
-                       direct_files_bytes, child_count, warning_count, depth
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
+                       direct_files_bytes, child_count, file_count,
+                       warning_count, depth
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
                 values,
             )
             self._directory_count += 1
@@ -336,6 +348,36 @@ class SQLiteSnapshotWriter:
                 self._fail(ResourceLimitExceeded(
                     "SQLite snapshot bytes",
                     self._sqlite_limits.max_database_bytes,
+                ))
+            self._fail(SQLiteSnapshotError(str(error)))
+        except (SQLiteSnapshotError, ResourceLimitExceeded) as error:
+            self._fail(error)
+
+    def insert_file(self, record: Mapping[str, Any]) -> None:
+        """Insert one immediate regular-file row without retaining it in Python."""
+        self._ensure_open()
+        try:
+            path = record.get("path")
+            parent = record.get("parentPath")
+            name = record.get("name")
+            if not all(isinstance(value, str) and value for value in (path, parent, name)):
+                raise SQLiteSnapshotError("file path, parent, and name must be strings")
+            check_path(path, self._resource_limits)
+            check_path(parent, self._resource_limits)
+            check_path(name, self._resource_limits)
+            self._connection.execute(
+                """INSERT INTO files(path,parent_path,name,name_fold,allocated_bytes)
+                   VALUES (?,?,?,?,?)""",
+                (path, parent, name, name.casefold(), self._integer(record, "bytes")),
+            )
+            self._file_count += 1
+            self._check_size()
+        except sqlite3.IntegrityError:
+            self._fail(SQLiteSnapshotError("duplicate or invalid file record"))
+        except sqlite3.OperationalError as error:
+            if "full" in str(error).lower():
+                self._fail(ResourceLimitExceeded(
+                    "SQLite snapshot bytes", self._sqlite_limits.max_database_bytes
                 ))
             self._fail(SQLiteSnapshotError(str(error)))
         except (SQLiteSnapshotError, ResourceLimitExceeded) as error:
@@ -364,6 +406,10 @@ class SQLiteSnapshotWriter:
         self._connection.execute("""
             CREATE INDEX directories_parent_order
             ON directories(parent_path, allocated_bytes DESC, name_fold, path)
+        """)
+        self._connection.execute("""
+            CREATE INDEX files_parent_order
+            ON files(parent_path, allocated_bytes DESC, name_fold, path)
         """)
         self._connection.execute(
             "CREATE INDEX directories_name_fold ON directories(name_fold)"
@@ -418,6 +464,17 @@ class SQLiteSnapshotWriter:
         """).fetchone()
         if bad_children is not None:
             raise SQLiteSnapshotValidationError("directory child count is inconsistent")
+        bad_files = connection.execute("""
+            SELECT parent.path FROM directories AS parent
+            LEFT JOIN (
+                SELECT parent_path, COUNT(*) AS actual_count FROM files
+                GROUP BY parent_path
+            ) AS children ON children.parent_path = parent.path
+            WHERE parent.file_count <> COALESCE(children.actual_count, 0)
+            LIMIT 1
+        """).fetchone()
+        if bad_files is not None:
+            raise SQLiteSnapshotValidationError("directory file count is inconsistent")
         reachable_count = int(connection.execute("""
             WITH RECURSIVE reachable(path) AS (
                 SELECT path FROM directories WHERE path = ?
@@ -432,6 +489,18 @@ class SQLiteSnapshotWriter:
             raise SQLiteSnapshotValidationError(
                 "directory hierarchy is cyclic or disconnected"
             )
+        missing_file_parent = connection.execute("""
+            SELECT files.path FROM files LEFT JOIN directories
+              ON directories.path = files.parent_path
+            WHERE directories.path IS NULL LIMIT 1
+        """).fetchone()
+        if missing_file_parent is not None:
+            raise SQLiteSnapshotValidationError("file has no parent directory")
+        collision = connection.execute("""
+            SELECT files.path FROM files JOIN directories USING(path) LIMIT 1
+        """).fetchone()
+        if collision is not None:
+            raise SQLiteSnapshotValidationError("file and directory paths collide")
 
     def finalize(
         self,
@@ -449,6 +518,7 @@ class SQLiteSnapshotWriter:
                 self.set_metadata(key, value)
             self.set_metadata("root_path", root_path)
             self.set_metadata("directory_count", expected_count)
+            self.set_metadata("file_count", self._file_count)
             self.set_metadata("schema_version", SQLITE_SNAPSHOT_SCHEMA_VERSION)
             self.set_metadata("snapshot_id", self._snapshot_id)
             self.set_metadata("complete", True)
@@ -458,7 +528,7 @@ class SQLiteSnapshotWriter:
             self._connection.close()
             self._closed = True
             return SQLiteSnapshot(
-                self.path, expected_count, root_path, self._identity
+                self.path, expected_count, root_path, self._identity, self._file_count
             )
         except sqlite3.OperationalError as error:
             if "full" in str(error).lower():
