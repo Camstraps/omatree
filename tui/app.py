@@ -168,11 +168,36 @@ class CursesApp:
         self.add(
             footer_row,
             0,
-            "↑/k ↓/j move  Enter/→/l expand  ←/h collapse  Backspace parent",
+            "↑/k ↓/j move  Enter toggle  →/l expand  ←/h collapse  Backspace parent",
         )
         self.add(footer_row + 1, 0, "Home/End  PgUp/PgDn  r rescan  q quit")
         self.screen.refresh()
         return body_rows
+
+    def handle_navigation_key(self, key: int, page_size: int) -> bool:
+        if key in (curses.KEY_UP, ord("k")):
+            self.browser.move(-1)
+        elif key in (curses.KEY_DOWN, ord("j")):
+            self.browser.move(1)
+        elif key in (curses.KEY_ENTER, 10, 13):
+            self.browser.toggle_selected()
+        elif key in (curses.KEY_RIGHT, ord("l")):
+            self.browser.expand_selected()
+        elif key in (curses.KEY_LEFT, ord("h")):
+            self.browser.collapse_selected()
+        elif key in (curses.KEY_BACKSPACE, 8, 127):
+            self.browser.select_parent()
+        elif key == curses.KEY_HOME:
+            self.browser.first()
+        elif key == curses.KEY_END:
+            self.browser.last()
+        elif key == curses.KEY_PPAGE:
+            self.browser.page(-1, page_size)
+        elif key == curses.KEY_NPAGE:
+            self.browser.page(1, page_size)
+        else:
+            return False
+        return True
 
     def run(self) -> None:
         self.screen.keypad(True)
@@ -206,31 +231,19 @@ class CursesApp:
                     return
             elif self.scanning:
                 continue
-            elif key in (curses.KEY_UP, ord("k")):
-                self.browser.move(-1)
-            elif key in (curses.KEY_DOWN, ord("j")):
-                self.browser.move(1)
-            elif key in (curses.KEY_ENTER, 10, 13, curses.KEY_RIGHT, ord("l")):
-                self.browser.expand_selected()
-            elif key in (curses.KEY_LEFT, ord("h")):
-                self.browser.collapse_or_parent()
-            elif key in (curses.KEY_BACKSPACE, 8, 127):
-                self.browser.select_parent()
-            elif key == curses.KEY_HOME:
-                self.browser.first()
-            elif key == curses.KEY_END:
-                self.browser.last()
-            elif key == curses.KEY_PPAGE:
-                self.browser.page(-1, page_size)
-            elif key == curses.KEY_NPAGE:
-                self.browser.page(1, page_size)
+            elif self.handle_navigation_key(key, page_size):
+                continue
             elif key in (ord("r"), ord("R")):
                 self.start_scan()
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="omatree", description="Browse directory disk usage in a terminal"
+        prog="omatree", description="Browse directory disk usage in a terminal",
+        epilog=(
+            "From the plugin launcher, use 'omatree install-cli' to create "
+            "~/.local/bin/omatree and 'omatree uninstall-cli' to remove it."
+        ),
     )
     parser.add_argument("path", nargs="?", help="directory to scan (default: HOME)")
     return parser

@@ -9,7 +9,12 @@ REPOSITORY = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY))
 
 from tui.app import main
+from tui.cli_install import install_cli, uninstall_cli
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 2 and sys.argv[1] == "install-cli":
+        raise SystemExit(install_cli(Path(__file__)))
+    if len(sys.argv) == 2 and sys.argv[1] == "uninstall-cli":
+        raise SystemExit(uninstall_cli(Path(__file__)))
     raise SystemExit(main())

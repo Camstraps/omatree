@@ -224,17 +224,23 @@ class BrowserController:
             self.expanded.add(path)
             self._rebuild_visible()
 
-    def collapse_or_parent(self) -> None:
+    def collapse_selected(self) -> None:
         path = self.selected_path
         if path is None or self.snapshot is None:
             return
-        node = self.snapshot.directories[path]
         if path in self.expanded:
             self.expanded.remove(path)
             self._rebuild_visible()
+
+    def toggle_selected(self) -> None:
+        path = self.selected_path
+        if path is None or self.snapshot is None:
             return
-        if node.parent_path:
-            self.select_path(node.parent_path)
+        if path in self.expanded:
+            self.expanded.remove(path)
+        elif self.snapshot.directories[path].children:
+            self.expanded.add(path)
+        self._rebuild_visible()
 
     def select_parent(self) -> None:
         path = self.selected_path
