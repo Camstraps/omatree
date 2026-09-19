@@ -1,4 +1,5 @@
 import argparse
+import io
 import json
 import os
 from pathlib import Path
@@ -311,16 +312,19 @@ class ExecutableIdentityTests(unittest.TestCase):
 
     def test_discovery_cli_rejects_oversized_serialized_output(self):
         oversized = {"schemaVersion": 1, "filesystems": ["x" * 128]}
-        stderr = mock.Mock()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
         with mock.patch.object(helper, "discover", return_value=oversized), \
                 mock.patch.object(helper, "DISCOVERY_STDOUT_LIMIT", 64), \
                 mock.patch.object(helper.sys, "stderr", stderr), \
-                mock.patch.object(helper.sys, "stdout", mock.Mock()), \
+                mock.patch.object(helper.sys, "stdout", stdout), \
                 mock.patch.object(
                     helper.argparse.ArgumentParser, "parse_args",
                     return_value=argparse.Namespace(command="discover"),
                 ):
             self.assertEqual(helper.main(), 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("Resource limit exceeded", json.loads(stderr.getvalue())["error"])
 
 
 if __name__ == "__main__":
