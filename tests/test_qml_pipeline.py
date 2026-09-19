@@ -154,10 +154,10 @@ class QmlScanPipelineTests(unittest.TestCase):
     def test_refresh_has_one_filesystem_scan_entrypoint(self):
         panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
         selection = panel.split("function selectFilesystem(index)", 1)[1].split(
-            "function rebuildTreeRows()", 1
+            "function requestSnapshotOpen(path)", 1
         )[0]
         self.assertIn("requestSnapshotOpen(mountpoint)", selection)
-        self.assertNotIn("requestScan(mountpoint)", selection)
+        self.assertNotIn("requestScan", selection)
         self.assertIn('text: root.scanning ? "Rescanning…" : "Rescan"', panel)
 
     def test_panel_uses_persistent_snapshot_open_and_typed_bounded_rows(self):

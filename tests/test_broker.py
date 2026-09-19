@@ -98,7 +98,8 @@ class BrokerTests(unittest.TestCase):
         self.root_a = self.runtime / "a"
         self.root_b = self.runtime / "b"
         self.root_c = self.runtime / "c"
-        for path in (self.root_a, self.root_b, self.root_c):
+        self.root_space = self.runtime / "space mount"
+        for path in (self.root_a, self.root_b, self.root_c, self.root_space):
             path.mkdir()
         self.bytes = io.BytesIO()
         self.output = BoundedOutputWriter(self.bytes)
@@ -160,6 +161,24 @@ class BrokerTests(unittest.TestCase):
             request_id, "activationCommit", generationId=generation
         ))
         return request_id
+
+    def persist(self, root):
+        generation = self.activate(root)
+        self.commit_activation(generation)
+        return generation
+
+    def open_persisted(self, root):
+        request_id = self.next_id("open")
+        self.broker.handle(request(
+            request_id, "snapshotOpen", path=str(root), mountpoint=str(root),
+        ))
+        message = next(
+            item for item in reversed(self.messages())
+            if item.get("requestId") == request_id
+        )
+        self.assertEqual(message["type"], "snapshotAvailable")
+        self.commit_activation(message["generationId"])
+        return message["generationId"]
 
     def query(self, operation, generation=None, **values):
         generation = generation or self.broker.active_generation_id
@@ -239,6 +258,97 @@ class BrokerTests(unittest.TestCase):
         self.assertIsNone(store.load(str(self.root_a), str(self.root_b)))
         loaded.path.write_bytes(b"not sqlite")
         self.assertIsNone(store.load(str(self.root_a), str(self.root_a)))
+
+    def test_switching_between_persisted_filesystems_never_rescans(self):
+        self.persist(self.root_a)
+        self.persist(self.root_b)
+        calls = self.scanner.calls
+        for root in (self.root_a, self.root_b, self.root_a, self.root_b):
+            self.open_persisted(root)
+        self.assertEqual(self.scanner.calls, calls)
+        store = self.broker._snapshot_store()
+        self.assertIsNotNone(store.load(str(self.root_a), str(self.root_a)))
+        self.assertIsNotNone(store.load(str(self.root_b), str(self.root_b)))
+        self.assertEqual(len(self.databases()), 2)
+
+    def test_rescan_replaces_only_its_filesystem_snapshot(self):
+        self.persist(self.root_a)
+        self.persist(self.root_b)
+        store = self.broker._snapshot_store()
+        old_a = store.load(str(self.root_a), str(self.root_a)).path
+        old_b = store.load(str(self.root_b), str(self.root_b)).path
+
+        self.open_persisted(self.root_a)
+        replacement_a = self.activate(self.root_a)
+        self.commit_activation(replacement_a)
+        new_a = store.load(str(self.root_a), str(self.root_a)).path
+        self.assertNotEqual(old_a, new_a)
+        self.assertFalse(old_a.exists())
+        self.assertEqual(store.load(str(self.root_b), str(self.root_b)).path, old_b)
+
+        self.open_persisted(self.root_b)
+        replacement_b = self.activate(self.root_b)
+        self.commit_activation(replacement_b)
+        self.assertFalse(old_b.exists())
+        self.assertTrue(new_a.exists())
+        self.assertEqual(len(self.databases()), 2)
+
+    def test_failed_and_cancelled_rescan_preserve_all_filesystems(self):
+        self.persist(self.root_a)
+        self.persist(self.root_b)
+        self.open_persisted(self.root_a)
+        store = self.broker._snapshot_store()
+        path_a = store.load(str(self.root_a), str(self.root_a)).path
+        path_b = store.load(str(self.root_b), str(self.root_b)).path
+
+        self.scanner.behavior[str(self.root_a)] = "fail"
+        self.start(self.root_a)
+        self.assertTrue(self.broker.wait_for_idle())
+        self.assertTrue(path_a.exists() and path_b.exists())
+
+        self.scanner.behavior[str(self.root_a)] = "slow"
+        self.scanner.release.clear()
+        staging = self.start(self.root_a)
+        self.assertTrue(self.scanner.started.wait(1))
+        self.broker.handle(request("cancel-mount-a", "scanCancel",
+                                   generationId=staging))
+        self.scanner.release.set()
+        self.assertTrue(self.broker.wait_for_idle())
+        self.assertTrue(path_a.exists() and path_b.exists())
+        self.assertEqual(len(self.databases()), 2)
+
+    def test_restart_spaces_and_corrupt_mount_are_isolated(self):
+        self.persist(self.root_a)
+        self.persist(self.root_b)
+        self.persist(self.root_space)
+        calls = self.scanner.calls
+        store = self.broker._snapshot_store()
+        broken_a = store.load(str(self.root_a), str(self.root_a))
+        valid_b_path = store.load(str(self.root_b), str(self.root_b)).path
+        broken_a.path.write_bytes(b"broken")
+        self.assertIsNone(store.load(str(self.root_a), str(self.root_a)))
+        self.assertEqual(store.load(str(self.root_b), str(self.root_b)).path,
+                         valid_b_path)
+
+        self.broker.shutdown("multi-restart")
+        output = BoundedOutputWriter(io.BytesIO())
+        restarted = SnapshotBroker(
+            output, runtime_dir=self.runtime, scan_function=self.scanner,
+            exclusion_provider=lambda _mount: set(),
+        )
+        try:
+            for index, root in enumerate((self.root_b, self.root_space, self.root_b)):
+                request_id = f"restart-open-{index}"
+                restarted.handle(request(request_id, "snapshotOpen", path=str(root),
+                                         mountpoint=str(root)))
+                message = [json.loads(line) for line in
+                           output._stream.getvalue().splitlines()][-1]
+                self.assertEqual(message["type"], "snapshotAvailable")
+                restarted.handle(request(f"restart-commit-{index}", "activationCommit",
+                                         generationId=message["generationId"]))
+            self.assertEqual(self.scanner.calls, calls)
+        finally:
+            restarted.shutdown("done")
 
     def test_a_remains_queryable_while_b_scans_and_b_is_not_queryable(self):
         active = self.activate()
@@ -512,7 +622,7 @@ class BrokerTests(unittest.TestCase):
         with self.assertRaises(BrokerProtocolError):
             self.output.write({"type": "x", "requestId": "x", "data": "z" * 65536})
 
-    def test_repeated_generation_cycle_leaves_one_database(self):
+    def test_repeated_generation_cycle_retains_one_database_per_filesystem(self):
         self.activate()
         self.scanner.behavior[str(self.root_b)] = "fail"
         self.start(self.root_b)
@@ -530,7 +640,7 @@ class BrokerTests(unittest.TestCase):
         generation_e = self.start(self.root_c)
         self.wait_active(generation_e)
         self.commit_activation(generation_e)
-        self.assertEqual(len(self.databases()), 1)
+        self.assertEqual(len(self.databases()), 2)
         self.assertEqual(self.scanner.peak_active, 1)
         self.assertLessEqual(self.broker.high_water.outstanding_requests, 4)
         self.assertLessEqual(self.broker.high_water.scan_workers, 1)

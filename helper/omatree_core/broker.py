@@ -79,6 +79,7 @@ class _Generation:
     retired: bool = False
     mountpoint: str = ""
     persistent: bool = False
+    delete_on_retire: bool = False
 
 
 @dataclass(slots=True)
@@ -586,8 +587,15 @@ class SnapshotBroker:
             self._previous = None
             if previous is not None:
                 previous.retired = True
+                previous.delete_on_retire = (
+                    not previous.persistent
+                    or (
+                        previous.mountpoint == current.mountpoint
+                        and previous.snapshot.root_path == current.snapshot.root_path
+                    )
+                )
         if previous is not None and previous.references == 0:
-            previous.snapshot.delete()
+            self._delete_retired(previous)
         self._emit(
             "activationCommitted", request.request_id,
             generationId=generation_id,
@@ -597,6 +605,11 @@ class SnapshotBroker:
         if self.snapshot_store is None:
             self.snapshot_store = PersistentSnapshotStore(self._cache_dir)
         return self.snapshot_store
+
+    @staticmethod
+    def _delete_retired(generation: _Generation) -> None:
+        if generation.delete_on_retire:
+            generation.snapshot.delete()
 
     def _activation_abort(self, request: BrokerRequest) -> None:
         generation_id = self._generation_id(request, required=True)
@@ -755,8 +768,7 @@ class SnapshotBroker:
                 self._current_query = None
                 job.generation.references -= 1
                 if job.generation.retired and job.generation.references == 0:
-                    if not job.generation.persistent:
-                        job.generation.snapshot.delete()
+                    self._delete_retired(job.generation)
                 self._outstanding.pop(job.request.request_id, None)
                 self._condition.notify_all()
 
