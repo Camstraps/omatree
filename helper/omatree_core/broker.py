@@ -367,7 +367,15 @@ class SnapshotBroker:
         with self._lock:
             if self._staging is not None or self._previous is not None:
                 raise BrokerProtocolError("snapshot activation is not settled")
-        snapshot = self._snapshot_store().load(path, mountpoint)
+            existing = self._active
+            reuse_existing = bool(
+                existing is not None and existing.persistent
+                and existing.snapshot.root_path == path
+                and existing.mountpoint == mountpoint
+            )
+        snapshot = existing.snapshot if reuse_existing else self._snapshot_store().load(
+            path, mountpoint
+        )
         if snapshot is None:
             self._emit("snapshotMissing", request.request_id, path=path, mountpoint=mountpoint)
             return
@@ -382,11 +390,12 @@ class SnapshotBroker:
                 "durationMs": reader._metadata_value("duration_ms"),
                 "createdAtMs": reader._metadata_value("created_at_ms"),
             }
-        generation_id = secrets.token_hex(16)
-        with self._lock:
-            self._previous = self._active
-            self._active = _Generation(generation_id, snapshot, mountpoint=mountpoint,
-                                       persistent=True)
+        generation_id = existing.generation_id if reuse_existing else secrets.token_hex(16)
+        if not reuse_existing:
+            with self._lock:
+                self._previous = self._active
+                self._active = _Generation(generation_id, snapshot, mountpoint=mountpoint,
+                                           persistent=True)
         self._emit("snapshotAvailable", request.request_id, generationId=generation_id,
                    path=path, **summary)
 

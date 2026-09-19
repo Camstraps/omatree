@@ -63,6 +63,20 @@ function brokerDirectoryRowError(row, maxPathBytes) {
   return ""
 }
 
+function summonMountpoint(payloadJson, maxPathBytes) {
+  try {
+    var payload = JSON.parse(String(payloadJson || "{}"))
+    if (!payload || payload.mountpoint === undefined) return ""
+    if (typeof payload.mountpoint !== "string" || payload.mountpoint === ""
+        || payload.mountpoint.charAt(0) !== "/"
+        || utf8Bytes(payload.mountpoint, maxPathBytes + 1) > maxPathBytes)
+      return ""
+    return payload.mountpoint
+  } catch (error) {
+    return ""
+  }
+}
+
 function outputLimitExceeded(chunkBytes, retainedBytes, maxBytes) {
   return chunkBytes > maxBytes || retainedBytes + chunkBytes > maxBytes
 }

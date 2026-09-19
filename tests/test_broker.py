@@ -215,6 +215,15 @@ class BrokerTests(unittest.TestCase):
             self.assertEqual(available["directoryCount"], 2)
             self.assertEqual(self.scanner.calls, calls)
             self.assertEqual(restarted.active_generation_id, available["generationId"])
+            restarted.handle(request("commit-open", "activationCommit",
+                                     generationId=available["generationId"]))
+            restarted.handle(request("open2", "snapshotOpen", path=str(self.root_a),
+                                     mountpoint=str(self.root_a)))
+            reopened = [
+                json.loads(line) for line in output._stream.getvalue().splitlines()
+            ][-1]
+            self.assertEqual(reopened["type"], "snapshotAvailable")
+            self.assertEqual(self.scanner.calls, calls)
         finally:
             restarted.shutdown("done")
 

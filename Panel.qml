@@ -296,14 +296,30 @@ Item {
 
   function open(payloadJson) {
     opened = true
+    var requestedMountpoint = FrontendSafety.summonMountpoint(payloadJson, maxPathBytes)
+    if (requestedMountpoint !== "") preferredMountpoint = requestedMountpoint
     startBroker()
     if (filesystemModel.count === 0) launchDiscovery()
-    else if (selectedFilesystem) {
-      pendingSnapshotOpen = { path: selectedFilesystem.mountpoint,
-        mountpoint: selectedFilesystem.mountpoint, generation: treeGeneration }
-      if (brokerReady) {
-        pendingSnapshotOpen = null
-        requestSnapshotOpen(selectedFilesystem.mountpoint)
+    else {
+      var selected = selectedFilesystemIndex
+      if (requestedMountpoint !== "") {
+        for (var index = 0; index < filesystemModel.count; index++) {
+          if (filesystemModel.get(index).mountpoint === requestedMountpoint) {
+            selected = index
+            break
+          }
+        }
+      }
+      if (selected < 0 && filesystemModel.count > 0) selected = 0
+      var mountpoint = selected >= 0 ? filesystemModel.get(selected).mountpoint : ""
+      if (mountpoint !== "" && selectedFilesystemIndex === selected
+          && treeRootPath === mountpoint && activeBackendAvailable) {
+        // A hidden panel with a live broker already owns this snapshot.
+      } else if (selected >= 0) {
+        if (selectedFilesystemIndex !== selected || treeRootPath !== mountpoint)
+          selectFilesystem(selected)
+        else
+          requestSnapshotOpen(mountpoint)
       }
     }
     Qt.callLater(function() { if (opened) keyCatcher.forceActiveFocus() })
@@ -312,12 +328,14 @@ Item {
   function close() {
     opened = false
     pendingScan = null
+    pendingSnapshotOpen = null
     cancelActiveScan()
     if (brokerProcess.running) {
       brokerExpectedStop = true
-      if (brokerReady)
+      if (brokerReady) {
         sendBrokerRequest("shutdown", {}, 2000, "", "")
-      else requestBrokerTermination()
+        brokerReady = false
+      } else requestBrokerTermination()
     }
   }
 
@@ -1463,6 +1481,14 @@ Item {
         snapshotState = activeGenerationId !== "" ? "backend-unavailable" : "failed"
       }
       brokerExpectedStop = false
+      if (root.opened) {
+        var reopenPath = root.selectedFilesystem
+          ? root.selectedFilesystem.mountpoint : root.preferredMountpoint
+        if (reopenPath !== "") root.pendingSnapshotOpen = {
+          path: reopenPath, mountpoint: reopenPath, generation: root.treeGeneration
+        }
+        Qt.callLater(function() { if (root.opened) root.startBroker() })
+      }
     }
   }
 

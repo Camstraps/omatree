@@ -88,7 +88,8 @@ class QmlScanPipelineTests(unittest.TestCase):
         self.assertIn("bar-widget", manifest["kinds"])
         self.assertEqual(manifest["entryPoints"]["barWidget"], "BarWidget.qml")
         self.assertEqual(manifest["barWidget"]["defaultSection"], "right")
-        self.assertIn('bar.shell.summon(moduleName, "{}")', widget)
+        self.assertIn('bar.shell.summon(moduleName, JSON.stringify(payload))', widget)
+        self.assertIn('mountpoint: String(filesystem.mountpoint)', widget)
         self.assertIn("displayMode = (displayMode + 1) % 4", widget)
         self.assertIn("totalBytes > 0", widget)
         self.assertIn('["/usr/bin/python3", helperPath, "discover"]', widget)
@@ -167,6 +168,37 @@ class QmlScanPipelineTests(unittest.TestCase):
         self.assertIn('selected.kind === "file"', panel)
         self.assertIn('kind: source.kind || "directory"', browser)
         self.assertEqual(panel.count('sendBrokerRequest("scanStart"'), 1)
+
+    def test_panel_open_and_bar_summon_do_not_directly_request_scan(self):
+        panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
+        widget = (REPOSITORY / "BarWidget.qml").read_text(encoding="utf-8")
+        open_body = panel.split("function open(payloadJson)", 1)[1].split(
+            "function close()", 1
+        )[0]
+        self.assertIn("summonMountpoint(payloadJson", open_body)
+        self.assertIn("activeBackendAvailable", open_body)
+        self.assertIn("requestSnapshotOpen", open_body)
+        self.assertNotIn("requestScan", open_body)
+        self.assertIn("JSON.stringify(payload)", widget)
+
+        handler = panel.split("function handleBrokerLine(rawLine)", 1)[1].split(
+            "function requestActivationCommit()", 1
+        )[0]
+        missing = handler.split('message.type === "snapshotMissing"', 1)[1].split(
+            'message.type !== "snapshotAvailable"', 1
+        )[0]
+        self.assertIn("requestScan(treeRootPath)", missing)
+        self.assertIn('onClicked: root.requestScan(root.treeRootPath)', panel)
+
+    def test_reopen_during_broker_shutdown_restarts_without_direct_scan(self):
+        panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")
+        exited = panel.split("id: brokerProcess", 1)[1].split(
+            "Timer { id: brokerDrainTimer", 1
+        )[0]
+        self.assertIn("if (root.opened)", exited)
+        self.assertIn("root.pendingSnapshotOpen", exited)
+        self.assertIn("root.startBroker()", exited)
+        self.assertNotIn("requestScan", exited)
 
     def test_stale_generation_is_rejected_before_activation_staging(self):
         panel = (REPOSITORY / "Panel.qml").read_text(encoding="utf-8")

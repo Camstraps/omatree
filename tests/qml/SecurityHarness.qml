@@ -26,6 +26,9 @@ ShellRoot {
   }
 
   function testLimits() {
+    if (!require(FrontendSafety.summonMountpoint("{}", 4096) === "", "normal panel summon")) return false
+    if (!require(FrontendSafety.summonMountpoint('{"mountpoint":"/home"}', 4096) === "/home", "bar mountpoint summon")) return false
+    if (!require(FrontendSafety.summonMountpoint('{"mountpoint":"relative"}', 4096) === "", "unsafe summon path")) return false
     if (!require(FrontendSafety.brokerQueueLimitError(1048576, 0, 0, 1048576, 256, 4194304) === "", "broker exact line bytes")) return false
     if (!require(FrontendSafety.brokerQueueLimitError(1048577, 0, 0, 1048576, 256, 4194304) !== "", "broker oversized line")) return false
     if (!require(FrontendSafety.brokerQueueLimitError(1, 255, 0, 1048576, 256, 4194304) === "", "broker exact line count")) return false

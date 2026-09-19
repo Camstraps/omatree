@@ -130,7 +130,11 @@ BarWidget {
   function cycleMode() { displayMode = (displayMode + 1) % 4 }
 
   function summonPanel() {
-    if (bar && bar.shell) bar.shell.summon(moduleName, "{}")
+    if (bar && bar.shell) {
+      var payload = filesystem && filesystem.mountpoint
+        ? { mountpoint: String(filesystem.mountpoint) } : {}
+      bar.shell.summon(moduleName, JSON.stringify(payload))
+    }
   }
 
   implicitWidth: button.implicitWidth
