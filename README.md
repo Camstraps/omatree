@@ -1,42 +1,58 @@
 # OmaTree
 
 OmaTree is an Omarchy disk-usage analyzer inspired by TreeSize and ncdu. It
-combines a native Quickshell panel, a lightweight bar widget, and an optional
-curses terminal interface.
+provides a native Quickshell panel, a lightweight capacity bar widget, and an
+optional curses terminal interface.
 
 ![OmaTree Marketplace preview](preview.png)
 
-## Features
+## Install
 
-- Filesystem capacity overview with physical-disk grouping where available
-- Filesystem-aware scans with explicit nested-mount pruning
-- Directory and immediate-file browsing, sorted directories first and then by size
-- Persistent SQLite snapshots that reopen without another recursive scan
-- Bounded, lazy pagination for very large directories
-- Snapshot-wide directory-name search and breadcrumb navigation
-- Allocated-size accounting (`st_blocks * 512`) with hardlink deduplication
-- Symlinks are never followed
-- Atomic, cancellable rescans that keep the previous snapshot available
-- Lightweight bar widget that performs capacity discovery only
-- Curses TUI using the shared discovery and scanner core
+Install and enable **OmaTree** from the Omarchy Marketplace, then restart the
+shell if prompted.
 
-## Installation and panel usage
-
-Install and enable OmaTree from the Omarchy Marketplace, or from GitHub:
+Alternatively, install the plugin directly from GitHub:
 
 ```bash
 omarchy plugin add https://github.com/Camstraps/omatree.git --enable
 omarchy restart shell
 ```
 
-Left-click the bar widget to open the panel. Right-click cycles its capacity
-display mode. Select a filesystem in the panel; OmaTree immediately reuses its
-last valid snapshot, or performs an initial scan when none exists. **Rescan**
-builds a replacement in the background while the current snapshot remains
-browseable. A replacement becomes visible only after successful validation.
+## Use the panel
 
-Panel search covers directory names across the complete active snapshot. File
-rows are browseable but are not included in search in v0.2.1.
+Left-click the OmaTree bar widget to open the panel. Right-click the widget to
+cycle its capacity display mode. The widget itself performs only lightweight
+capacity discovery and never starts a recursive scan.
+
+Choose a filesystem in the panel to browse its directories and immediate
+files. Directories appear first, followed by files; each group is ordered by
+size. Files are not expandable.
+
+OmaTree keeps a separate persistent snapshot for each filesystem. Opening the
+panel or switching between filesystems immediately reuses the latest valid
+snapshot, including when the panel or shell has been restarted. An automatic
+scan occurs only when the selected filesystem has no valid compatible
+snapshot.
+
+Use **Rescan** to refresh a snapshot explicitly. The replacement is built in
+the background while the current snapshot remains browseable, and becomes
+visible only after successful validation. A failed or cancelled rescan leaves
+the previous snapshot untouched and does not affect snapshots for other
+filesystems.
+
+Search covers directory names across the complete active snapshot. Immediate
+file rows are browseable, but file search is not included in v0.2.1.
+
+## Highlights
+
+- Filesystem capacity overview with physical-disk grouping where available
+- Filesystem-aware scanning with explicit nested-mount pruning
+- Persistent, per-filesystem SQLite snapshots
+- Bounded lazy pagination for directories with very large numbers of entries
+- Snapshot-wide directory-name search and breadcrumb navigation
+- Allocated-size accounting (`st_blocks * 512`) with hardlink deduplication
+- Symlinks are never followed
+- Atomic, cancellable background rescans
 
 ## Terminal interface
 
@@ -47,18 +63,20 @@ Run the launcher directly (the default target is `$HOME`):
 ~/.config/omarchy/plugins/io.github.camstraps.omatree/bin/omatree ~/Downloads
 ```
 
-The initial TUI remains directory-only. It shares OmaTree's scanner, mount
-policy, allocated-size accounting, hardlink handling, and symlink safety.
+The TUI is directory-only in v0.2.1. It shares OmaTree's scanner, mount policy,
+allocated-size accounting, hardlink handling, and symlink safety.
 
-To explicitly install a shell command, create an OmaTree-owned symlink with:
+To optionally install `omatree` as a shell command, run:
 
 ```bash
 ~/.config/omarchy/plugins/io.github.camstraps.omatree/bin/omatree install-cli
 omatree ~/Downloads
 ```
 
-The plugin never changes `~/.local/bin` merely by being enabled. The installer
-refuses to overwrite unrelated paths. Remove its symlink with:
+This explicitly creates an OmaTree-owned symlink at `~/.local/bin/omatree`;
+enabling the plugin never changes that directory automatically. The installer
+is idempotent and refuses to overwrite unrelated paths. Before removing the
+plugin, remove its symlink with:
 
 ```bash
 omatree uninstall-cli
@@ -71,12 +89,11 @@ Ctrl-C cancels without committing a partial result.
 
 ## Architecture and safety
 
-The Python scanner streams finalized records directly into a generation-specific
-SQLite database. The panel-owned broker validates and atomically activates the
-database, then serves bounded pages for browsing, breadcrumbs, and search.
-Quickshell never retains a complete filesystem tree. Files in directories with
-hundreds of thousands of entries remain paginated, and opening, navigation, and
-search do not rescan the filesystem.
+The Python scanner writes finalized records directly into a SQLite snapshot.
+A panel-owned broker validates and atomically activates snapshots, then serves
+bounded pages for browsing, breadcrumbs, and search. Quickshell never retains a
+complete filesystem tree. Large directories remain paginated, and opening,
+navigation, filesystem switching, and search do not rescan the filesystem.
 
 Snapshots are private per-user cache data. Schema-incompatible or corrupt
 snapshots are ignored and rebuilt safely. Scanner, database, protocol, parser,
@@ -98,10 +115,15 @@ snapshots are disposable and may be removed from `$XDG_CACHE_HOME/omatree`
 
 ### v0.2.1
 
-- Reuses the latest valid per-filesystem snapshot on panel reopen.
-- Adds explicit background Rescan with atomic replacement.
-- Adds bounded, paginated immediate-file browsing in the panel.
-- Preserves directory-only snapshot-wide search and the directory-only TUI.
+- Persists an independent snapshot for each filesystem across panel and shell
+  restarts.
+- Reuses the selected filesystem's snapshot when opening from the bar widget
+  and when switching filesystems, avoiding unnecessary rescans.
+- Adds explicit background **Rescan** with atomic per-filesystem replacement;
+  the previous snapshot remains available if a rescan fails or is cancelled.
+- Adds bounded, paginated immediate-file browsing with directories first and
+  files second, ordered by size within each group.
+- Keeps snapshot-wide search and the TUI directory-only for this release.
 
 ### v0.2.0
 
